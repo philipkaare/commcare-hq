@@ -194,7 +194,10 @@ class DomainInvoiceFactory(object):
             is_hidden=False,
             subscription__subscriber__domain=invoice.get_domain(),
         ))
-        if total_balance > SMALL_INVOICE_THRESHOLD:
+
+        should_set_date_due = ((total_balance > SMALL_INVOICE_THRESHOLD) or
+                               (invoice.account.auto_pay_enabled and total_balance > Decimal(0)))
+        if should_set_date_due:
             days_until_due = DEFAULT_DAYS_UNTIL_DUE
             if subscription.date_delay_invoicing is not None:
                 td = subscription.date_delay_invoicing - self.date_end
@@ -341,10 +344,8 @@ class LineItemFactory(object):
     @property
     @memoized
     def subscribed_domains(self):
-        if self.subscription.subscriber.organization is None and self.subscription.subscriber.domain is None:
-            raise LineItemError("No domain or organization could be obtained as the subscriber.")
-        if self.subscription.subscriber.organization is not None:
-            return Domain.get_by_organization(self.subscription.subscriber.organization)
+        if self.subscription.subscriber.domain is None:
+            raise LineItemError("No domain could be obtained as the subscriber.")
         return [self.subscription.subscriber.domain]
 
     @property

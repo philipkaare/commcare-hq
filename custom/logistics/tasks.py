@@ -8,18 +8,18 @@ from django.db import transaction
 from casexml.apps.stock.const import TRANSACTION_TYPE_LA
 from casexml.apps.stock.models import StockReport, StockTransaction
 from casexml.apps.stock.signals import update_stock_state_for_transaction
-from corehq.apps.commtrack.models import SupplyPointCase
 from corehq.apps.hqcase.dbaccessors import \
     get_supply_point_case_in_domain_by_id
 from corehq.apps.locations.models import SQLLocation, Location
 from corehq.apps.products.models import SQLProduct
+from corehq.form_processor.interfaces.supply import SupplyInterface
 from custom.logistics.commtrack import save_stock_data_checkpoint, synchronization
 from custom.logistics.models import StockDataCheckpoint
 from dimagi.utils.chunked import chunked
 from dimagi.utils.dates import force_to_datetime
 
 
-@celery.task(queue='background_queue', ignore_result=True)
+@celery.task(queue='logistics_background_queue', ignore_result=True)
 def stock_data_task(api_object):
     # checkpoint logic
     start_date = datetime.today()
@@ -69,7 +69,8 @@ def stock_data_task(api_object):
                 1000,
                 offset,
                 params={'domain': api_object.domain},
-                domain=api_object.domain
+                domain=api_object.domain,
+                atomic=True
             )
             offset = 0
 
@@ -79,7 +80,7 @@ def stock_data_task(api_object):
     checkpoint.save()
 
 
-@celery.task(queue='background_queue')
+@celery.task(queue='logistics_background_queue')
 def process_facility_task(api_object, facility, start_from=None):
     checkpoint = StockDataCheckpoint.objects.get(domain=api_object.domain)
     limit = checkpoint.limit
@@ -104,9 +105,9 @@ def process_facility_task(api_object, facility, start_from=None):
     save_stock_data_checkpoint(checkpoint, '', 1000, 0, checkpoint.date, api_object.get_location_id(facility))
 
 
-@celery.task(queue='background_queue', ignore_result=True)
+@celery.task(queue='logistics_background_queue', ignore_result=True)
 def resync_web_users(api_object):
-    web_users_sync = api_object.apis[4]
+    web_users_sync = api_object.apis[5]
     synchronization(web_users_sync, None, None, 100, 0)
 
 
@@ -135,7 +136,7 @@ def locations_fix(domain):
                 name=loc.name,
                 domain=domain
             )
-            SupplyPointCase.get_or_create_by_location(fake_location)
+            SupplyInterface(domain).get_or_create_by_location(fake_location)
 
 
 @celery.task(ignore_result=True)

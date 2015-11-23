@@ -7,7 +7,10 @@ from django.core.management.base import NoArgsCommand
 import json
 from corehq.util.couch_helpers import paginate_view
 from pillowtop.couchdb import CachedCouchDB
-from pillowtop.listener import BulkPillow
+from pillowtop.feed.couch import change_from_couch_row
+from pillowtop.feed.interface import Change
+from pillowtop.listener import AliasedElasticPillow, PythonPillow
+from pillowtop.pillow.interface import PillowRuntimeContext
 
 CHUNK_SIZE = 10000
 POOL_SIZE = 15
@@ -159,7 +162,7 @@ class PtopReindexer(NoArgsCommand):
         # that happen to cases while we're doing our reindexing would not get skipped once we
         # finish.
 
-        current_db_seq = self.pillow.couch_db.info()['update_seq']
+        current_db_seq = self.pillow.get_couch_db().info()['update_seq']
 
         # Write sequence file to disk
         seq_filename = self.get_seq_filename()
@@ -189,7 +192,7 @@ class PtopReindexer(NoArgsCommand):
     def _bootstrap(self, options):
         self.resume = options['resume']
         self.pillow = self.pillow_class()
-        self.bulk = options['bulk'] and isinstance(self.pillow, BulkPillow)
+        self.bulk = options['bulk'] and isinstance(self.pillow, AliasedElasticPillow)
         self.indexing_pillow = self.indexing_pillow_class()
         self.db = self.doc_class.get_db()
         self.runfile = options['runfile']
@@ -245,8 +248,9 @@ class PtopReindexer(NoArgsCommand):
             self.pillow.set_checkpoint({'seq': seq})
 
         self.post_load_hook()
-        self.pillow.couch_db = CachedCouchDB(self.pillow.document_class.get_db().uri,
-                                             readonly=True)
+        self.pillow.set_couch_db(
+            CachedCouchDB(self.pillow.document_class.get_db().uri, readonly=True)
+        )
         if self.bulk:
             self.log("Preparing Bulk Payload")
             self.load_bulk()
@@ -254,7 +258,7 @@ class PtopReindexer(NoArgsCommand):
             self.log("Loading traditional method")
             self.load_traditional()
         end = datetime.utcnow()
-
+        self.finish_saving()
         self.pre_complete_hook()
         self.log("done in %s seconds" % (end - start).seconds)
 
@@ -265,7 +269,10 @@ class PtopReindexer(NoArgsCommand):
                 try:
                     if not self.custom_filter(row):
                         break
-                    self.pillow.processor(row, do_set_checkpoint=False)
+                    if not isinstance(row, Change):
+                        assert isinstance(row, dict)
+                        row = change_from_couch_row(row)
+                    self.pillow.processor(row, PillowRuntimeContext(do_set_checkpoint=False))
                     break
                 except Exception, ex:
                     retries += 1
@@ -303,10 +310,15 @@ class PtopReindexer(NoArgsCommand):
 
         self.send_bulk(bulk_slice, start, end)
 
+    def finish_saving(self):
+        # python pillows may have some chunked up changes so make sure they get processed
+        if isinstance(self.pillow, PythonPillow) and self.pillow.use_chunking:
+            self.pillow.process_chunk()
+
     def send_bulk(self, slice, start, end):
         doc_ids = [x['id'] for x in slice]
-        self.pillow.couch_db.bulk_load(doc_ids, purge_existing=True)
-        filtered_ids = set([d['_id'] for d in filter(self.custom_filter, self.pillow.couch_db.get_all())])
+        self.pillow.get_couch_db().bulk_load(doc_ids, purge_existing=True)
+        filtered_ids = set([d['_id'] for d in filter(self.custom_filter, self.pillow.get_couch_db().get_all())])
         filtered_slice = filter(lambda change: change['id'] in filtered_ids, slice)
 
         retries = 0
@@ -314,7 +326,7 @@ class PtopReindexer(NoArgsCommand):
         while retries < MAX_TRIES:
             try:
                 self.log('Sending chunk to ES')
-                assert isinstance(self.pillow, BulkPillow)
+                assert isinstance(self.pillow, AliasedElasticPillow)
                 self.pillow.process_bulk(filtered_slice)
                 break
             except Exception as ex:

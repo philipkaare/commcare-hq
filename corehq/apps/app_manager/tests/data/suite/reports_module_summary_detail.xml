@@ -31,7 +31,19 @@
         </header>
         <template>
           <text>
-            <xpath function="description"/>
+            <xpath function="report description"/>
+          </text>
+        </template>
+      </field>
+      <field>
+        <header>
+          <text>
+            <locale id="cchq.report_last_sync"/>
+          </text>
+        </header>
+        <template>
+          <text>
+            <xpath function="format-date(date(instance('reports')/reports/@last_sync), '%Y-%m-%d %H:%M')"/>
           </text>
         </template>
       </field>
@@ -48,18 +60,6 @@
             </series>
             <configuration/>
           </graph>
-        </template>
-      </field>
-      <field>
-        <header>
-          <text>
-            <locale id="cchq.report_last_sync"/>
-          </text>
-        </header>
-        <template>
-          <text>
-            <xpath function="format-date(date(instance('reports')/reports/@last_sync), '%Y-%m-%d %H:%M')"/>
-          </text>
         </template>
       </field>
     </detail>

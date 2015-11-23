@@ -16,7 +16,7 @@ class AppSummaryView(JSONResponseMixin, LoginAndDomainMixin, BasePageView, Appli
     page_title = ugettext_noop("Summary")
     template_name = 'app_manager/summary.html'
 
-    @method_decorator(use_bootstrap3())
+    @use_bootstrap3
     def dispatch(self, request, *args, **kwargs):
         return super(AppSummaryView, self).dispatch(request, *args, **kwargs)
 
@@ -86,12 +86,14 @@ class AppSummaryView(JSONResponseMixin, LoginAndDomainMixin, BasePageView, Appli
                 forms.append({
                     'id': form.unique_id,
                     'name': form.name,
+                    'short_comment': form.short_comment,
                     'questions': [FormQuestionResponse(q).to_json() for q in questions],
                 })
 
             modules.append({
                 'id': module.unique_id,
                 'name': module.name,
+                'short_comment': module.short_comment,
                 'forms': forms
             })
         return {

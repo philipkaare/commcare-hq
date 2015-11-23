@@ -3,7 +3,7 @@ import random
 import string
 from django.conf import settings
 from django.core.exceptions import ValidationError
-from corehq.apps.users.models import CommCareUser, CouchUser
+from corehq.apps.users.models import CommCareUser, CouchUser, WebUser
 from django.forms import forms
 from corehq.apps.users.util import format_username
 
@@ -14,10 +14,12 @@ from corehq.apps.accounting.utils import domain_has_privilege
 from corehq.apps.sms.util import (clean_phone_number, clean_text,
     get_available_backends)
 from corehq.apps.sms.models import (SMSLog, OUTGOING, INCOMING,
-    PhoneNumber, SMS, SelfRegistrationInvitation)
+    PhoneNumber, SMS, SelfRegistrationInvitation, MessagingEvent)
 from corehq.apps.sms.messages import (get_message, MSG_OPTED_IN,
-    MSG_OPTED_OUT, MSG_DUPLICATE_USERNAME, MSG_USERNAME_TOO_LONG)
-from corehq.apps.sms.mixin import MobileBackend, VerifiedNumber, SMSBackend
+    MSG_OPTED_OUT, MSG_DUPLICATE_USERNAME, MSG_USERNAME_TOO_LONG,
+    MSG_REGISTRATION_WELCOME_CASE, MSG_REGISTRATION_WELCOME_MOBILE_WORKER)
+from corehq.apps.sms.mixin import (MobileBackend, VerifiedNumber, SMSBackend,
+    BadSMSConfigException)
 from corehq.apps.domain.models import Domain
 from datetime import datetime
 
@@ -70,6 +72,19 @@ def log_sms_exception(msg):
     })
 
 
+def get_location_id_by_contact(domain, contact):
+    if isinstance(contact, CommCareUser):
+        return contact.location_id
+    elif isinstance(contact, WebUser):
+        return contact.get_location_id(domain)
+    else:
+        return None
+
+
+def get_location_id_by_verified_number(v):
+    return get_location_id_by_contact(v.domain, v.owner)
+
+
 def send_sms(domain, contact, phone_number, text, metadata=None):
     """
     Sends an outbound SMS. Returns false if it fails.
@@ -86,6 +101,7 @@ def send_sms(domain, contact, phone_number, text, metadata=None):
         direction=OUTGOING,
         date = datetime.utcnow(),
         backend_id=None,
+        location_id=get_location_id_by_contact(domain, contact),
         text = text
     )
     if contact:
@@ -96,7 +112,8 @@ def send_sms(domain, contact, phone_number, text, metadata=None):
     return queue_outgoing_sms(msg)
 
 
-def send_sms_to_verified_number(verified_number, text, metadata=None):
+def send_sms_to_verified_number(verified_number, text, metadata=None,
+        logged_subevent=None):
     """
     Sends an sms using the given verified phone number entry.
 
@@ -105,7 +122,15 @@ def send_sms_to_verified_number(verified_number, text, metadata=None):
 
     return  True on success, False on failure
     """
-    backend = verified_number.backend
+    try:
+        backend = verified_number.backend
+    except BadSMSConfigException as e:
+        if logged_subevent:
+            logged_subevent.error(MessagingEvent.ERROR_GATEWAY_NOT_FOUND,
+                additional_error_text=e.message)
+            return False
+        raise
+
     msg = SMSLog(
         couch_recipient_doc_type = verified_number.owner_doc_type,
         couch_recipient = verified_number.owner_id,
@@ -114,6 +139,7 @@ def send_sms_to_verified_number(verified_number, text, metadata=None):
         date = datetime.utcnow(),
         domain = verified_number.domain,
         backend_id = backend._id,
+        location_id=get_location_id_by_verified_number(verified_number),
         text = text
     )
     add_msg_tags(msg, metadata)
@@ -369,6 +395,10 @@ def process_sms_registration(msg):
                         invitation = SelfRegistrationInvitation.by_phone(msg.phone_number)
                         if invitation:
                             invitation.completed()
+
+                        if domain.enable_registration_welcome_sms_for_mobile_worker:
+                            send_sms(domain.name, None, cleaned_phone_number,
+                                     get_message(MSG_REGISTRATION_WELCOME_MOBILE_WORKER, domain=domain.name))
                     except ValidationError as e:
                         send_sms(domain.name, None, cleaned_phone_number, e.messages[0])
 
@@ -378,11 +408,14 @@ def process_sms_registration(msg):
                         case_type=domain.sms_case_registration_type,
                         case_name="unknown",
                         user_id=domain.sms_case_registration_user_id,
-                        contact_phone_number=strip_plus(msg.phone_number),
+                        contact_phone_number=cleaned_phone_number,
                         contact_phone_number_is_verified="1",
                         owner_id=domain.sms_case_registration_owner_id,
                     )
                     registration_processed = True
+                    if domain.enable_registration_welcome_sms_for_case:
+                        send_sms(domain.name, None, cleaned_phone_number,
+                                 get_message(MSG_REGISTRATION_WELCOME_CASE, domain=domain.name))
             msg.domain = domain.name
             msg.save()
 
@@ -455,9 +488,7 @@ def process_incoming(msg, delay=True):
         msg.couch_recipient_doc_type = v.owner_doc_type
         msg.couch_recipient = v.owner_id
         msg.domain = v.domain
-        contact = v.owner
-        if isinstance(contact, CommCareUser) and hasattr(contact, 'location_id'):
-            msg.location_id = contact.location_id
+        msg.location_id = get_location_id_by_verified_number(v)
         msg.save()
 
     if msg.domain_scope:
@@ -510,7 +541,7 @@ def process_incoming(msg, delay=True):
 
         if not handled:
             import verify
-            verify.process_verification(msg.phone_number, msg)
+            verify.process_verification(v, msg)
 
     if msg.domain and domain_has_privilege(msg.domain, privileges.INBOUND_SMS):
         create_billable_for_sms(msg)

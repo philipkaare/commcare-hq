@@ -1,34 +1,13 @@
-$(function() {
-    var model = new LocationSettingsViewModel();
-    $('#settings').submit(function() {
-        return model.presubmit();
-    });
-
-    model.load(settings);
-    ko.applyBindings(model, $('#settings').get(0));
-
-    $("form#settings").on("change input", function() {
-        $(this).find(":submit").enable();
-    });
-
-    $("form#settings button").on("click", function() {
-        $("form#settings").find(":submit").enable();
-    });
-});
-
-
-function LocationSettingsViewModel() {
+function LocationSettingsViewModel(loc_types, commtrack_enabled) {
     this.loc_types = ko.observableArray();
+    this.loc_types($.map(loc_types, function(loc_type) {
+        return new LocationTypeModel(loc_type, commtrack_enabled);
+    }));
 
     this.json_payload = ko.observable();
 
     this.loc_types_error = ko.observable(false);
-
-    this.load = function(data) {
-        this.loc_types($.map(data.loc_types, function(e) {
-            return new LocationTypeModel(e);
-        }));
-    };
+    this.advanced_mode = ko.observable(false);
 
     this.loc_type_options = function(loc_type) {
         return this.loc_types().filter(function(type) {
@@ -44,7 +23,7 @@ function LocationSettingsViewModel() {
 
     this.new_loctype = function() {
         var parent_pk = (_.last(settings.loc_types()) || {}).pk;
-        var new_loctype = new LocationTypeModel({parent_type: parent_pk}, this);
+        var new_loctype = new LocationTypeModel({parent_type: parent_pk}, commtrack_enabled);
         new_loctype.onBind = function() {
             var $inp = $(this.$e).find('.loctype_name');
             $inp.focus();
@@ -132,23 +111,30 @@ var get_fake_pk = function () {
     };
 }();
 
-function LocationTypeModel(data, root) {
-    var name = data.name || '';
+function LocationTypeModel(loc_type, commtrack_enabled) {
+    var name = loc_type.name || '';
     var self = this;
-    this.pk = data.pk || get_fake_pk();
+    this.pk = loc_type.pk || get_fake_pk();
     this.name = ko.observable(name);
 
-    this.parent_type = ko.observable(data.parent_type);
-    this.tracks_stock = ko.observable(!data.administrative);
-    this.shares_cases = ko.observable(data.shares_cases);
-    this.view_descendants = ko.observable(data.view_descendants);
+    this.parent_type = ko.observable(loc_type.parent_type);
+    this.tracks_stock = ko.observable(!loc_type.administrative);
+    this.shares_cases = ko.observable(loc_type.shares_cases);
+    this.view_descendants = ko.observable(loc_type.view_descendants);
+    this.code = ko.observable(loc_type.code);
 
     this.name_error = ko.observable(false);
+    this.code_error = ko.observable(false);
 
     this.validate = function() {
         this.name_error(false);
         if (!this.name()) {
             this.name_error(true);
+            return false;
+        }
+        this.code_error(false);
+        if (!this.code()) {
+            this.code_error(true);
             return false;
         }
         return true;
@@ -159,9 +145,10 @@ function LocationTypeModel(data, root) {
             pk: this.pk,
             name: this.name(),
             parent_type: this.parent_type() || null,
-            administrative: !this.tracks_stock(),
+            administrative: commtrack_enabled ? !this.tracks_stock() : true,
             shares_cases: this.shares_cases() === true,
-            view_descendants: this.view_descendants() === true
+            view_descendants: this.view_descendants() === true,
+            code: this.code()
         };
     };
 }

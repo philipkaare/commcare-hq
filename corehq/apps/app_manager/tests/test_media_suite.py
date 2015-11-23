@@ -7,14 +7,14 @@ from corehq.apps.app_manager import id_strings
 from corehq.apps.app_manager.const import APP_V2
 from corehq.apps.app_manager.models import Application, Module, ReportModule, ReportAppConfig
 from corehq.apps.app_manager.tests.app_factory import AppFactory
-from corehq.apps.app_manager.tests.util import TestFileMixin
+from corehq.apps.app_manager.tests.util import TestXmlMixin
 from corehq.apps.builds.models import BuildSpec
 from corehq.apps.hqmedia.models import CommCareImage, CommCareAudio
 
 import commcare_translations
 
 
-class MediaSuiteTest(SimpleTestCase, TestFileMixin):
+class MediaSuiteTest(SimpleTestCase, TestXmlMixin):
     file_path = ('data', 'suite')
 
     def test_all_media_paths(self):
@@ -82,9 +82,9 @@ class MediaSuiteTest(SimpleTestCase, TestFileMixin):
 
     def test_all_media_report_module(self):
         """
-        Report Modules don't support media
+        Report Modules support media
         """
-        from corehq.apps.userreports.tests import get_sample_report_config
+        from corehq.apps.userreports.tests.utils import get_sample_report_config
 
         app = Application.new_app('domain', "Untitled Application", application_version=APP_V2)
 
@@ -101,14 +101,14 @@ class MediaSuiteTest(SimpleTestCase, TestFileMixin):
 
         image_path = 'jr://file/commcare/case_list_image.jpg'
         audio_path = 'jr://file/commcare/case_list_audo.mp3'
-        app.get_module(0).case_list_form.set_icon('en', image_path)
-        app.get_module(0).case_list_form.set_audio('en', audio_path)
+        app.get_module(0).media_image.update({'en': image_path})
+        app.get_module(0).media_audio.update({'en': audio_path})
 
-        self.assertFalse(app.get_module(0).uses_media())
-        self.assertEqual(len(app.all_media), 0)
+        self.assertTrue(app.get_module(0).uses_media())
+        self.assertEqual(len(app.all_media), 2)
 
 
-class LocalizedMediaSuiteTest(SimpleTestCase, TestFileMixin):
+class LocalizedMediaSuiteTest(SimpleTestCase, TestXmlMixin):
     """
         For CC >= 2.21
         Tests following for form, module, case_list_menu, case_list_form

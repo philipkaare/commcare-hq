@@ -1,14 +1,13 @@
 import uuid
 from django.test import TestCase
 from casexml.apps.case.mock import CaseBlock
-from casexml.apps.case.xml import V2
+from casexml.apps.case.util import post_case_blocks
 from corehq.apps.users.models import CommCareUser
 from corehq.apps.users.util import format_username
 from corehq.apps.domain.shortcuts import create_domain
-from casexml.apps.case.util import post_case_blocks
 import os
 from custom.uth import utils
-from casexml.apps.case.tests import delete_all_xforms, delete_all_cases
+from casexml.apps.case.tests.util import delete_all_xforms, delete_all_cases
 from casexml.apps.case.models import CommCareCase
 from custom.uth.const import UTH_DOMAIN, UTH_CASE_TYPE
 from couchdbkit import MultipleResultsFound
@@ -24,7 +23,6 @@ class UTHTests(TestCase):
             case_type=UTH_CASE_TYPE,
             user_id=user_id,
             owner_id=user_id,
-            version=V2,
             update={
                 'exam_number': scan_id,
                 'scanner_serial': serial,

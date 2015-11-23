@@ -27,12 +27,9 @@ class UserGenerationCache(GenerationCache):
         "users/web_users_by_domain",
         "users/by_default_phone",
         "users/admins_by_domain",
-        "users/by_org_and_team",
         "users/by_username",
         "users/mailing_list_emails",
-        "domain/related_to_domain",
         "domain/old_users",
-        "domain/docs",
         "users_extra/phones_to_domains",
         "eula_reports/non_eulized_users"
     ]
@@ -56,26 +53,9 @@ class UserRoleGenerationCache(GenerationCache):
     generation_key = '#gen#user_role#'
     doc_types = ['UserRole']
     views = [
-        'domain/related_to_domain',
         'users/roles_by_domain'
     ]
 
-
-class OrganizationGenerationCache(GenerationCache):
-    generation_key = '#gen#org#'
-    doc_types = ['Organization']
-    views = [
-        'orgs/by_name'
-    ]
-
-
-class TeamGenerationCache(GenerationCache):
-    generation_key = '#gen#team#'
-    doc_types = ['Team']
-    views = [
-        'orgs/team_by_domain',
-        'orgs/team_by_org_and_name'
-    ]
 
 class ReportGenerationCache(GenerationCache):
     generation_key = '#gen#reports#'
@@ -111,15 +91,6 @@ class DomainInvitationGenerationCache(GenerationCache):
     doc_types = ['Invitation']
     views = [
         'users/open_invitations_by_email',
-        'users/open_invitations_by_domain',
-    ]
-
-
-class CommtrackConfigGenerationCache(GenerationCache):
-    generation_key = '#gen#commtrackconfig#'
-    doc_types = ['CommtrackConfig']
-    views = [
-        'commtrack/domain_config',
     ]
 
 

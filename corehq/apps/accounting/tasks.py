@@ -9,6 +9,7 @@ from django.conf import settings
 from django.http import HttpRequest, QueryDict
 from django.template.loader import render_to_string
 from django.utils.translation import ugettext
+
 from corehq.apps.domain.models import Domain
 from corehq.apps.accounting import utils
 from corehq.apps.accounting.exceptions import (
@@ -29,6 +30,7 @@ from corehq.apps.accounting.utils import (
     fmt_dollar_amount,
     get_change_status,
 )
+from corehq.apps.accounting.payment_handlers import AutoPayInvoicePaymentHandler
 from corehq.apps.users.models import FakeUser, WebUser
 from corehq.const import USER_DATE_FORMAT, USER_MONTH_FORMAT
 from couchexport.export import export_from_tables
@@ -276,7 +278,7 @@ def create_wire_credits_invoice(domain_name,
 
 
 @task(ignore_result=True)
-def send_purchase_receipt(payment_record, core_product,
+def send_purchase_receipt(payment_record, core_product, domain,
                           template_html, template_plaintext,
                           additional_context):
     email = payment_record.payment_method.web_user
@@ -294,7 +296,7 @@ def send_purchase_receipt(payment_record, core_product,
     context = {
         'name': name,
         'amount': fmt_dollar_amount(payment_record.amount),
-        'project': payment_record.creditadjustment_set.last().credit_line.account.created_by_domain,
+        'project': domain,
         'date_paid': payment_record.date_created.strftime(USER_DATE_FORMAT),
         'product': core_product,
         'transaction_id': payment_record.public_transaction_id,
@@ -406,3 +408,9 @@ def weekly_digest():
         "[BILLING] Sent summary of ending subscriptions from %(today)s" % {
             'today': today.isoformat(),
         })
+
+
+@periodic_task(run_every=crontab(hour=01, minute=0,))
+def pay_autopay_invoices():
+    """ Check for autopayable invoices every day and pay them """
+    AutoPayInvoicePaymentHandler().pay_autopayable_invoices(datetime.datetime.today())

@@ -1,5 +1,11 @@
-from celery.task import task
+from casexml.apps.case.models import CommCareCase
+from celery.schedules import crontab
+from celery.task import task, periodic_task
 from celery.utils.log import get_task_logger
+from corehq.apps.data_interfaces.models import AutomaticUpdateRule
+from datetime import datetime
+from dimagi.utils.couch.database import iter_docs
+from django.conf import settings
 from django.core.cache import cache
 from django.template.loader import render_to_string
 from django.utils.translation import ugettext as _
@@ -65,8 +71,46 @@ def bulk_form_management_async(archive_or_restore, domain, couch_user, form_ids_
         xform_ids = get_ids_from_url(form_ids_or_query_string, domain, couch_user)
 
     if not xform_ids:
-        soft_assert(notify_admins=True, exponential_backoff=False)
         return {'messages': {'errors': [_('No Forms are supplied')]}}
 
     response = archive_or_restore_forms(domain, couch_user, xform_ids, mode, task)
     return response
+
+
+@periodic_task(
+    run_every=crontab(hour=0, minute=0, day_of_week='sat'),
+    queue=settings.CELERY_PERIODIC_QUEUE,
+    ignore_result=True
+)
+def run_case_update_rules(now=None):
+    domains = (AutomaticUpdateRule
+               .objects
+               .filter(active=True, deleted=False)
+               .values_list('domain', flat=True)
+               .distinct()
+               .order_by('domain'))
+    for domain in domains:
+        run_case_update_rules_for_domain.delay(domain, now)
+
+
+@task(queue='background_queue', acks_late=True, ignore_result=True)
+def run_case_update_rules_for_domain(domain, now=None):
+    now = now or datetime.utcnow()
+    all_rules = AutomaticUpdateRule.by_domain(domain)
+    rules_by_case_type = AutomaticUpdateRule.organize_rules_by_case_type(all_rules)
+
+    for case_type, rules in rules_by_case_type.iteritems():
+        boundary_date = AutomaticUpdateRule.get_boundary_date(rules, now)
+        case_ids = AutomaticUpdateRule.get_case_ids(domain, boundary_date, case_type)
+
+        for doc in iter_docs(CommCareCase.get_db(), case_ids):
+            case = CommCareCase.wrap(doc)
+            for rule in rules:
+                closed = rule.apply_rule(case, now)
+                if closed:
+                    # If the case has been closed, stop processing further rules
+                    break
+
+        for rule in rules:
+            rule.last_run = now
+            rule.save()

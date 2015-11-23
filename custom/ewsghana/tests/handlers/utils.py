@@ -1,11 +1,11 @@
 import datetime
 from couchdbkit.exceptions import ResourceNotFound
 from corehq.apps.consumption.shortcuts import set_default_consumption_for_supply_point
+from corehq.form_processor.interfaces.supply import SupplyInterface
 from couchforms.models import XFormInstance
 from corehq.apps.domain.models import Domain
 from corehq.apps.accounting import generator
-from corehq.apps.commtrack.models import CommtrackConfig, CommtrackActionConfig, StockState, ConsumptionConfig, \
-    SupplyPointCase
+from corehq.apps.commtrack.models import CommtrackConfig, CommtrackActionConfig, StockState, ConsumptionConfig
 from corehq.apps.commtrack.tests.util import TEST_BACKEND, make_loc
 from corehq.apps.locations.models import Location, SQLLocation, LocationType
 from corehq.apps.locations.tests.util import delete_all_locations
@@ -14,7 +14,7 @@ from corehq.apps.sms.backend import test
 from corehq.apps.sms.mixin import MobileBackend
 from corehq.apps.users.models import CommCareUser
 from custom.ewsghana.models import EWSGhanaConfig
-from custom.ewsghana.utils import prepare_domain, bootstrap_user
+from custom.ewsghana.utils import prepare_domain, bootstrap_user, create_backend
 from custom.logistics.tests.test_script import TestScript
 from casexml.apps.stock.models import StockReport, StockTransaction
 from casexml.apps.stock.models import DocDomainMapping
@@ -59,6 +59,8 @@ class EWSScriptTest(TestScript):
     @classmethod
     def setUpClass(cls):
         domain = prepare_domain(TEST_DOMAIN)
+        cls.sms_backend_mapping, cls.backend = create_backend()
+
         p = Product(domain=domain.name, name='Jadelle', code='jd', unit='each')
         p.save()
         p2 = Product(domain=domain.name, name='Male Condom', code='mc', unit='each')
@@ -82,21 +84,21 @@ class EWSScriptTest(TestScript):
         region = make_loc(code='region', name='Test region', type='region', domain=domain.name, parent=national)
         loc = make_loc(code="garms", name="Test RMS", type="Regional Medical Store", domain=domain.name,
                        parent=national)
-        SupplyPointCase.create_from_location(TEST_DOMAIN, loc)
+        SupplyInterface.create_from_location(TEST_DOMAIN, loc)
         loc.save()
 
         rms2 = make_loc(code="wrms", name="Test RMS 2", type="Regional Medical Store", domain=domain.name,
                         parent=region)
-        SupplyPointCase.create_from_location(TEST_DOMAIN, rms2)
+        SupplyInterface.create_from_location(TEST_DOMAIN, rms2)
         rms2.save()
 
         cms = make_loc(code="cms", name="Central Medical Stores", type="Central Medical Store",
                        domain=domain.name, parent=national)
-        SupplyPointCase.create_from_location(TEST_DOMAIN, cms)
+        SupplyInterface.create_from_location(TEST_DOMAIN, cms)
         cms.save()
 
         loc2 = make_loc(code="tf", name="Test Facility", type="CHPS Facility", domain=domain.name, parent=region)
-        SupplyPointCase.create_from_location(TEST_DOMAIN, loc2)
+        SupplyInterface.create_from_location(TEST_DOMAIN, loc2)
         loc2.save()
 
         supply_point_id = loc.linked_supply_point().get_id
@@ -120,6 +122,8 @@ class EWSScriptTest(TestScript):
         cls.region_user = bootstrap_user(username='regionuser', domain=domain.name, home_loc=region,
                                          first_name='test6', last_name='test6',
                                          phone_number='66666')
+        cls.without_location = bootstrap_user(username='withoutloc', domain=domain.name, first_name='test7',
+                                              last_name='test7', phone_number='77777')
         try:
             XFormInstance.get(docid='test-xform')
         except ResourceNotFound:
@@ -178,6 +182,8 @@ class EWSScriptTest(TestScript):
         EWSGhanaConfig.for_domain(TEST_DOMAIN).delete()
         DocDomainMapping.objects.all().delete()
         generator.delete_all_subscriptions()
+        cls.sms_backend_mapping.delete()
+        cls.backend.delete()
         Domain.get_by_name(TEST_DOMAIN).delete()
 
 

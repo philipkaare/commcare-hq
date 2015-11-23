@@ -1,6 +1,6 @@
 from django.conf.urls import patterns, url, include
 from corehq.apps.app_manager.view_helpers import DynamicTemplateView
-from corehq.apps.app_manager.views import DownloadCCZ, AppSummaryView
+from corehq.apps.app_manager.views import DownloadCCZ, AppSummaryView, AppDiffView
 from corehq.apps.hqmedia.urls import application_urls as hqmedia_urls
 from corehq.apps.hqmedia.urls import download_urls as media_download_urls
 
@@ -57,6 +57,7 @@ urlpatterns = patterns('corehq.apps.app_manager.views',
     url(r'^new_app/$', 'new_app', name='new_app'),
     url(r'^default_new_app/$', 'default_new_app', name='default_new_app'),
     url(r'^new_form/(?P<app_id>[\w-]+)/(?P<module_id>[\w-]+)/$', 'new_form'),
+    url(r'^drop_user_case/(?P<app_id>[\w-]+)/$', 'drop_user_case', name='drop_user_case'),
 
     url(r'^delete_app/(?P<app_id>[\w-]+)/$', 'delete_app'),
     url(r'^delete_module/(?P<app_id>[\w-]+)/(?P<module_unique_id>[\w-]+)/$',
@@ -147,6 +148,8 @@ urlpatterns = patterns('corehq.apps.app_manager.views',
         include('corehq.apps.app_manager.download_urls')),
     url(r'^formdefs/(?P<app_id>[\w-]+)/', 'formdefs', name='formdefs'),
     url(r'^ng_template/(?P<template>[\w-]+)', DynamicTemplateView.as_view(), name='ng_template'),
+
+    url(r'^diff/(?P<first_app_id>[\w-]+)/(?P<second_app_id>[\w-]+)/$', AppDiffView.as_view(), name=AppDiffView.urlname),
 
     url(r'^', include('custom.ucla.urls')),
 )

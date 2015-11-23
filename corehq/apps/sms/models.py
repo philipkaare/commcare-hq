@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 # vim: ai ts=4 sts=4 et sw=4
-import base64
 import logging
 import uuid
 from dimagi.ext.couchdbkit import *
@@ -263,6 +262,7 @@ class SMS(SyncSQLToCouchMixin, models.Model):
     ERROR_MESSAGE_IS_STALE = 'MESSAGE_IS_STALE'
     ERROR_INVALID_DIRECTION = 'INVALID_DIRECTION'
     ERROR_PHONE_NUMBER_OPTED_OUT = 'PHONE_NUMBER_OPTED_OUT'
+    ERROR_INVALID_DESTINATION_NUMBER = 'INVALID_DESTINATION_NUMBER'
 
     ERROR_MESSAGES = {
         ERROR_TOO_MANY_UNSUCCESSFUL_ATTEMPTS:
@@ -273,6 +273,8 @@ class SMS(SyncSQLToCouchMixin, models.Model):
             ugettext_noop('Unknown message direction.'),
         ERROR_PHONE_NUMBER_OPTED_OUT:
             ugettext_noop('Phone number has opted out of receiving SMS.'),
+        ERROR_INVALID_DESTINATION_NUMBER:
+            ugettext_noop("The gateway can't reach the destination number."),
     }
 
     couch_id = models.CharField(max_length=126, null=True, db_index=True)
@@ -807,7 +809,9 @@ class MessagingEvent(models.Model, MessagingStatusMixin):
     ERROR_INTERNAL_SERVER_ERROR = 'INTERNAL_SERVER_ERROR'
     ERROR_GATEWAY_ERROR = 'GATEWAY_ERROR'
     ERROR_NO_SUITABLE_GATEWAY = 'NO_SUITABLE_GATEWAY'
+    ERROR_GATEWAY_NOT_FOUND = 'GATEWAY_NOT_FOUND'
     ERROR_NO_EMAIL_ADDRESS = 'NO_EMAIL_ADDRESS'
+    ERROR_TRIAL_EMAIL_LIMIT_REACHED = 'TRIAL_EMAIL_LIMIT_REACHED'
 
     ERROR_MESSAGES = {
         ERROR_NO_RECIPIENT:
@@ -850,8 +854,13 @@ class MessagingEvent(models.Model, MessagingStatusMixin):
             ugettext_noop('Gateway error.'),
         ERROR_NO_SUITABLE_GATEWAY:
             ugettext_noop('No suitable gateway could be found.'),
+        ERROR_GATEWAY_NOT_FOUND:
+            ugettext_noop('Gateway could not be found.'),
         ERROR_NO_EMAIL_ADDRESS:
             ugettext_noop('Recipient has no email address.'),
+        ERROR_TRIAL_EMAIL_LIMIT_REACHED:
+            ugettext_noop("Cannot send any more reminder emails. The limit for "
+                "sending reminder emails on a Trial plan has been reached."),
     }
 
     domain = models.CharField(max_length=126, null=False, db_index=True)
@@ -1060,8 +1069,7 @@ class MessagingEvent(models.Model, MessagingStatusMixin):
         content_type, form_unique_id, form_name = cls.get_content_info_from_reminder(
             reminder_definition, reminder)
 
-        from corehq.apps.reminders.models import RECIPIENT_LOCATION
-        if recipient and reminder_definition.recipient == RECIPIENT_LOCATION:
+        if recipient and reminder_definition.recipient_is_list_of_locations(recipient):
             if len(recipient) == 1:
                 recipient_type = (cls.RECIPIENT_LOCATION_PLUS_DESCENDANTS
                                   if reminder_definition.include_child_locations
@@ -1266,7 +1274,7 @@ class SelfRegistrationInvitation(models.Model):
             self.domain,
             None,
             self.phone_number,
-            get_message(MSG_MOBILE_WORKER_INVITATION_START)
+            get_message(MSG_MOBILE_WORKER_INVITATION_START, domain=self.domain)
         )
 
     def send_step2_java_sms(self):
@@ -1275,12 +1283,12 @@ class SelfRegistrationInvitation(models.Model):
             self.domain,
             None,
             self.phone_number,
-            get_message(MSG_MOBILE_WORKER_JAVA_INVITATION, context=(self.domain,))
+            get_message(MSG_MOBILE_WORKER_JAVA_INVITATION, context=(self.domain,), domain=self.domain)
         )
 
     def send_step2_android_sms(self):
-        from corehq.apps.hqwebapp.utils import sign
         from corehq.apps.sms.api import send_sms
+        from corehq.apps.sms.views import InvitationAppInfoView
         from corehq.apps.users.views.mobile.users import CommCareUserSelfRegistrationView
 
         registration_url = absolute_reverse(CommCareUserSelfRegistrationView.urlname,
@@ -1289,20 +1297,22 @@ class SelfRegistrationInvitation(models.Model):
             self.domain,
             None,
             self.phone_number,
-            get_message(MSG_MOBILE_WORKER_ANDROID_INVITATION, context=(registration_url,))
+            get_message(MSG_MOBILE_WORKER_ANDROID_INVITATION, context=(registration_url,), domain=self.domain)
         )
 
+        """
+        # Until odk 2.24 gets released to the Google Play store, this part won't work
         if self.odk_url:
-            url = str(self.odk_url).strip()
-            message = 'ccapp: %s signature: %s' % (url, sign(url))
-            message = base64.b64encode(message)
-            message = '[COMMCARE APP - DO NOT DELETE] %s' % message
+            app_info_url = absolute_reverse(InvitationAppInfoView.urlname,
+                args=[self.domain, self.token])
+            message = '[commcare app - do not delete] %s' % app_info_url
             send_sms(
                 self.domain,
                 None,
                 self.phone_number,
                 message,
             )
+        """
 
     def expire(self):
         self.expiration_date = datetime.utcnow().date() - timedelta(days=1)

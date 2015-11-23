@@ -2,27 +2,30 @@ from collections import defaultdict
 from alembic.autogenerate.api import compare_metadata
 from datetime import datetime, timedelta
 from casexml.apps.case.models import CommCareCase
-from corehq.apps.userreports.exceptions import TableRebuildError
+from corehq.apps.userreports.exceptions import TableRebuildError, StaleRebuildError
 from corehq.apps.userreports.models import DataSourceConfiguration, StaticDataSourceConfiguration
 from corehq.apps.userreports.sql import IndicatorSqlAdapter, metadata
 from corehq.apps.userreports.tasks import rebuild_indicators
 from corehq.db import connection_manager
 from dimagi.utils.logging import notify_error
 from fluff.signals import get_migration_context, get_tables_to_rebuild
+from pillowtop.checkpoints.manager import PillowCheckpoint, get_django_checkpoint_store
 from pillowtop.couchdb import CachedCouchDB
 from pillowtop.listener import PythonPillow
 
 
 REBUILD_CHECK_INTERVAL = 10 * 60  # in seconds
+UCR_CHECKPOINT_ID = 'pillow-checkpoint-ucr-main'
+UCR_STATIC_CHECKPOINT_ID = 'pillow-checkpoint-ucr-static'
 
 
 class ConfigurableIndicatorPillow(PythonPillow):
 
-    def __init__(self):
-        # run_ptop never passes args to __init__ so make that explicit by not supporting any
+    def __init__(self, pillow_checkpoint_id=UCR_CHECKPOINT_ID):
         # todo: this will need to not be hard-coded if we ever split out forms and cases into their own domains
         couch_db = CachedCouchDB(CommCareCase.get_db().uri, readonly=False)
-        super(ConfigurableIndicatorPillow, self).__init__(couch_db=couch_db)
+        checkpoint = PillowCheckpoint(get_django_checkpoint_store(), pillow_checkpoint_id)
+        super(ConfigurableIndicatorPillow, self).__init__(couch_db=couch_db, checkpoint=checkpoint)
         self.bootstrapped = False
         self.last_bootstrapped = datetime.utcnow()
 
@@ -66,18 +69,18 @@ class ConfigurableIndicatorPillow(PythonPillow):
 
             tables_to_rebuild = get_tables_to_rebuild(diffs, table_map.keys())
             for table_name in tables_to_rebuild:
-                table = table_map[table_name]
+                sql_adapter = table_map[table_name]
                 try:
-                    self.rebuild_table(table)
+                    self.rebuild_table(sql_adapter)
                 except TableRebuildError, e:
                     notify_error(unicode(e))
 
-    def rebuild_table(self, table):
-        table.rebuild_table()
-
-    def python_filter(self, doc):
-        # filtering is done manually per indicator see change_transport
-        return True
+    def rebuild_table(self, sql_adapter):
+        config = sql_adapter.config
+        latest_rev = config.get_db().get_rev(config._id)
+        if config._rev != latest_rev:
+            raise StaleRebuildError('Tried to rebuild a stale table ({})! Ignoring...'.format(config))
+        sql_adapter.rebuild_table()
 
     def change_trigger(self, changes_dict):
         self.bootstrap_if_needed()
@@ -95,16 +98,15 @@ class ConfigurableIndicatorPillow(PythonPillow):
             elif table.config.deleted_filter(doc):
                 table.delete(doc)
 
-    def set_checkpoint(self, change):
-        # override this to rebootstrap the tables
-        super(ConfigurableIndicatorPillow, self).set_checkpoint(change)
-
 
 class StaticDataSourcePillow(ConfigurableIndicatorPillow):
+
+    def __init__(self):
+        super(StaticDataSourcePillow, self).__init__(pillow_checkpoint_id=UCR_STATIC_CHECKPOINT_ID)
 
     def get_all_configs(self):
         return StaticDataSourceConfiguration.all()
 
-    def rebuild_table(self, table):
-        super(StaticDataSourcePillow, self).rebuild_table(table)
-        rebuild_indicators.delay(table.config.get_id)
+    def rebuild_table(self, sql_adapter):
+        super(StaticDataSourcePillow, self).rebuild_table(sql_adapter)
+        rebuild_indicators.delay(sql_adapter.config.get_id)

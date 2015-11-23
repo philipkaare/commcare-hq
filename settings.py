@@ -28,6 +28,9 @@ LESS_WATCH = False
 # "dev-min" - use built/minified vellum (submodules/formdesigner/_build/src)
 VELLUM_DEBUG = None
 
+# Build paths inside the project like this: os.path.join(BASE_DIR, ...)
+BASE_DIR = os.path.dirname(__file__)
+
 # gets set to False for unit tests that run without the database
 DB_ENABLED = True
 try:
@@ -86,13 +89,18 @@ LOCALE_PATHS = (
     os.path.join(FILEPATH, 'locale'),
 )
 
+BOWER_COMPONENTS = os.path.join(FILEPATH, 'bower_components')
+
 STATICFILES_FINDERS = (
     "django.contrib.staticfiles.finders.FileSystemFinder",
     "django.contrib.staticfiles.finders.AppDirectoriesFinder",
     'compressor.finders.CompressorFinder',
+    'djangobower.finders.BowerFinder',
 )
 
-STATICFILES_DIRS = ()
+STATICFILES_DIRS = (
+    BOWER_COMPONENTS,
+)
 
 # bleh, why did this submodule have to be removed?
 # deploy fails if this item is present and the path does not exist
@@ -103,6 +111,7 @@ del _formdesigner_path
 
 DJANGO_LOG_FILE = "%s/%s" % (FILEPATH, "commcarehq.django.log")
 ACCOUNTING_LOG_FILE = "%s/%s" % (FILEPATH, "commcarehq.accounting.log")
+ANALYTICS_LOG_FILE = "%s/%s" % (FILEPATH, "commcarehq.analytics.log")
 
 # URL prefix for admin media -- CSS, JavaScript and images. Make sure to use a
 # trailing slash.
@@ -164,7 +173,7 @@ TEMPLATE_CONTEXT_PROCESSORS = [
     # sticks the base template inside all responses
     "corehq.util.context_processors.base_template",
     "corehq.util.context_processors.analytics_js",
-    "corehq.util.context_processors.raven",
+    'corehq.util.context_processors.websockets_override',
 ]
 
 TEMPLATE_DIRS = []
@@ -181,15 +190,15 @@ DEFAULT_APPS = (
     'djcelery',
     'djtables',
     'django_prbac',
-    'djkombu',
+    'djangobower',
     'djangular',
     'couchdbkit.ext.django',
     'crispy_forms',
     'gunicorn',
-    'raven.contrib.django.raven_compat',
     'compressor',
     'mptt',
     'tastypie',
+    'ws4redis',
 )
 
 CRISPY_TEMPLATE_PACK = 'bootstrap'
@@ -200,7 +209,6 @@ CRISPY_ALLOWED_TEMPLATE_PACKS = (
 
 HQ_APPS = (
     'django_digest',
-    'rosetta',
     'auditcare',
     'hqscripts',
     'casexml.apps.case',
@@ -228,6 +236,7 @@ HQ_APPS = (
     'corehq.apps.commtrack',
     'corehq.apps.consumption',
     'corehq.apps.tzmigration',
+    'corehq.form_processor',
     'couchforms',
     'couchexport',
     'couchlog',
@@ -238,6 +247,7 @@ HQ_APPS = (
     'langcodes',
     'corehq.apps.analytics',
     'corehq.apps.callcenter',
+    'corehq.apps.change_feed',
     'corehq.apps.crud',
     'corehq.apps.custom_data_fields',
     'corehq.apps.receiverwrapper',
@@ -256,25 +266,28 @@ HQ_APPS = (
     'corehq.apps.sms',
     'corehq.apps.smsforms',
     'corehq.apps.ivr',
-    'corehq.apps.tropo',
-    'corehq.apps.twilio',
+    'corehq.messaging.smsbackends.tropo',
+    'corehq.messaging.smsbackends.twilio',
     'corehq.apps.dropbox',
-    'corehq.apps.megamobile',
-    'corehq.apps.kookoo',
-    'corehq.apps.sislog',
-    'corehq.apps.yo',
-    'corehq.apps.telerivet',
-    'corehq.apps.mach',
+    'corehq.messaging.smsbackends.megamobile',
+    'corehq.messaging.ivrbackends.kookoo',
+    'corehq.messaging.smsbackends.sislog',
+    'corehq.messaging.smsbackends.yo',
+    'corehq.messaging.smsbackends.telerivet',
+    'corehq.messaging.smsbackends.mach',
+    'corehq.messaging.smsbackends.http',
+    'corehq.messaging.smsbackends.smsgh',
+    'corehq.messaging.smsbackends.apposit',
+    'corehq.messaging.smsbackends.test',
     'corehq.apps.performance_sms',
     'corehq.apps.registration',
-    'corehq.apps.unicel',
+    'corehq.messaging.smsbackends.unicel',
     'corehq.apps.reports',
     'corehq.apps.reports_core',
     'corehq.apps.userreports',
     'corehq.apps.data_interfaces',
     'corehq.apps.export',
     'corehq.apps.builds',
-    'corehq.apps.orgs',
     'corehq.apps.api',
     'corehq.apps.indicators',
     'corehq.apps.cachehq',
@@ -295,10 +308,11 @@ HQ_APPS = (
     'pillow_retry',
     'corehq.apps.style',
     'corehq.apps.styleguide',
-    'corehq.apps.grapevine',
+    'corehq.messaging.smsbackends.grapevine',
     'corehq.apps.dashboard',
     'corehq.util',
     'dimagi.ext',
+    'corehq.doctypemigrations',
 
     # custom reports
     'a5288',
@@ -331,14 +345,18 @@ HQ_APPS = (
     'custom.colalife',
     'custom.intrahealth',
     'custom.world_vision',
-    'custom.tdh',
     'custom.up_nrhm',
 
     'custom.care_pathways',
     'custom.common',
 
     'custom.dhis2',
+    'custom.openclinica',
     'custom.guinea_backup',
+
+    # tests only
+    # todo: figure out how to not put these into INSTALLED_APPS, TEST_APPS doesn't seem to work
+    'testapps.test_pillowtop',
 )
 
 TEST_APPS = ()
@@ -349,24 +367,25 @@ APPS_TO_EXCLUDE_FROM_TESTS = (
     'couchdbkit.ext.django',
     'corehq.apps.data_interfaces',
     'corehq.apps.ivr',
-    'corehq.apps.mach',
+    'corehq.messaging.smsbackends.mach',
+    'corehq.messaging.smsbackends.http',
     'corehq.apps.ota',
     'corehq.apps.settings',
-    'corehq.apps.telerivet',
-    'corehq.apps.tropo',
-    'corehq.apps.megamobile',
-    'corehq.apps.yo',
+    'corehq.messaging.smsbackends.telerivet',
+    'corehq.messaging.smsbackends.tropo',
+    'corehq.messaging.smsbackends.megamobile',
+    'corehq.messaging.smsbackends.yo',
+    'corehq.messaging.smsbackends.smsgh',
+    'corehq.messaging.smsbackends.apposit',
     'crispy_forms',
     'django_extensions',
+    'djangobower',
     'django_prbac',
     'djcelery',
     'djtables',
-    'djkombu',
     'gunicorn',
     'langcodes',
     'luna',
-    'raven.contrib.django.raven_compat',
-    'rosetta',
     'custom.apps.crs_reports',
     'custom.m4change',
 
@@ -388,6 +407,7 @@ INSTALLED_APPS = DEFAULT_APPS + HQ_APPS
 # rather than the default 'accounts/profile'
 LOGIN_REDIRECT_URL = '/'
 
+
 REPORT_CACHE = 'default'  # or e.g. 'redis'
 
 ####### Domain settings  #######
@@ -403,17 +423,6 @@ LOGIN_URL = "/accounts/login/"
 # If a user tries to access domain admin pages but isn't a domain
 # administrator, here's where he/she is redirected
 DOMAIN_NOT_ADMIN_REDIRECT_PAGE_NAME = "homepage"
-
-# domain syncs
-# e.g.
-#               { sourcedomain1: { "domain": targetdomain1,
-#                      "transform": path.to.transformfunction1 },
-#                 sourcedomain2: {...} }
-DOMAIN_SYNCS = {}
-# if you want to deidentify app names, put a dictionary in your settings
-# of source names to deidentified names
-DOMAIN_SYNC_APP_NAME_MAP = {}
-DOMAIN_SYNC_DATABASE_NAME = "commcarehq-public"
 
 
 ####### Release Manager App settings  #######
@@ -486,7 +495,7 @@ FIXTURE_GENERATORS = {
         "corehq.apps.callcenter.fixturegenerators.indicators_fixture_generator",
         "corehq.apps.products.fixtures.product_fixture_generator",
         "corehq.apps.programs.fixtures.program_fixture_generator",
-        "corehq.apps.userreports.fixtures.report_fixture_generator",
+        "corehq.apps.app_manager.fixtures.report_fixture_generator",
         # custom
         "custom.bihar.reports.indicators.fixtures.generator",
         "custom.m4change.fixtures.report_fixtures.generator",
@@ -516,9 +525,6 @@ TRANSFER_FILE_DIR_NAME = None
 
 GET_URL_BASE = 'dimagi.utils.web.get_url_base'
 
-SMS_GATEWAY_URL = "http://localhost:8001/"
-SMS_GATEWAY_PARAMS = "user=my_username&password=my_password&id=%(phone_number)s&text=%(message)s"
-
 # celery
 BROKER_URL = 'django://'  # default django db based
 
@@ -541,6 +547,15 @@ CELERY_REMINDER_RULE_QUEUE = CELERY_MAIN_QUEUE
 # It's set to the main queue here and can be overridden to put it
 # on its own queue.
 CELERY_REMINDER_CASE_UPDATE_QUEUE = CELERY_MAIN_QUEUE
+
+
+# websockets config
+from settingshelper import get_allowed_websocket_channels
+WEBSOCKET_URL = '/ws/'
+WS4REDIS_PREFIX = 'ws'
+WSGI_APPLICATION = 'ws4redis.django_runserver.application'
+WS4REDIS_ALLOWED_CHANNELS = get_allowed_websocket_channels
+
 
 TEST_RUNNER = 'testrunner.TwoStageTestRunner'
 # this is what gets appended to @domain after your accounts
@@ -576,17 +591,6 @@ COUCHLOG_AUTH_DECORATOR = 'corehq.apps.domain.decorators.require_superuser_or_de
 
 # couchlog/case search
 LUCENE_ENABLED = False
-
-
-# unicel sms config
-UNICEL_CONFIG = {"username": "Dimagi",
-                 "password": "changeme",
-                 "sender": "Promo"}
-
-# mach sms config
-MACH_CONFIG = {"username": "Dimagi",
-               "password": "changeme",
-               "service_profile": "changeme"}
 
 ####### SMS Queue Settings #######
 
@@ -691,19 +695,18 @@ AUDIT_MODULES = [
 
 # Don't use google analytics unless overridden in localsettings
 ANALYTICS_IDS = {
-    'GOOGLE_ANALYTICS_ID': '',
-    'PINGDOM_ID': '',
-    'ANALYTICS_ID_PUBLIC_COMMCARE': '',
+    'GOOGLE_ANALYTICS_API_ID': '',
+    'ANALYTICS_API_ID_PUBLIC_COMMCARE': '',
     'KISSMETRICS_KEY': '',
     'HUBSPOT_API_KEY': '',
-    'HUBSPOT_ID': '',
+    'HUBSPOT_API_ID': '',
 }
 
 ANALYTICS_CONFIG = {
     "HQ_INSTANCE": '',  # e.g. "www" or "staging"
 }
 
-OPEN_EXCHANGE_RATES_ID = ''
+OPEN_EXCHANGE_RATES_API_ID = ''
 
 # for touchforms maps
 GMAPS_API_KEY = "changeme"
@@ -821,6 +824,12 @@ LOGGING = {
             'formatter': 'verbose',
             'filename': ACCOUNTING_LOG_FILE
         },
+        'analytics': {
+            'level': 'DEBUG',
+            'class': 'logging.FileHandler',
+            'formatter': 'simple',
+            'filename': ANALYTICS_LOG_FILE
+        },
         'couchlog': {
             'level': 'WARNING',
             'class': 'couchlog.handlers.CouchHandler',
@@ -835,17 +844,13 @@ LOGGING = {
             'filters': ['require_debug_false'],
             'class': 'corehq.util.log.NotifyExceptionEmailer',
         },
-        'sentry': {
-            'level': 'ERROR',
-            'class': 'raven.contrib.django.raven_compat.handlers.SentryHandler',
-        },
         'null': {
             'class': 'django.utils.log.NullHandler',
         },
     },
     'loggers': {
         '': {
-            'handlers': ['console', 'file', 'couchlog', 'sentry'],
+            'handlers': ['console', 'file', 'couchlog'],
             'propagate': True,
             'level': 'INFO',
         },
@@ -864,22 +869,17 @@ LOGGING = {
             'propagate': True,
         },
         'celery.task': {
-            'handlers': ['console', 'file', 'couchlog', 'sentry'],
+            'handlers': ['console', 'file', 'couchlog'],
             'level': 'INFO',
             'propagate': True
         },
         'pillowtop': {
-            'handlers': ['pillowtop', 'sentry'],
+            'handlers': ['pillowtop'],
             'level': 'ERROR',
             'propagate': False,
         },
-        'pillowtop_eval': {
-            'handlers': ['sentry'],
-            'level': 'INFO',
-            'propagate': False,
-        },
         'smsbillables': {
-            'handlers': ['file', 'sentry'],
+            'handlers': ['file'],
             'level': 'ERROR',
             'propagate': False,
         },
@@ -889,16 +889,21 @@ LOGGING = {
             'propagate': False,
         },
         'accounting': {
-            'handlers': ['accountinglog', 'sentry', 'console', 'couchlog', 'mail_admins'],
+            'handlers': ['accountinglog', 'console', 'couchlog', 'mail_admins'],
             'level': 'INFO',
             'propagate': False,
+        },
+        'analytics': {
+            'handlers': ['analytics'],
+            'level': 'DEBUG',
+            'propagate': True,
         },
     }
 }
 
 # Django Compressor
 COMPRESS_PRECOMPILERS = (
-   ('text/less', 'corehq.apps.style.precompilers.LessFilter'),
+    ('text/less', 'corehq.apps.style.precompilers.LessFilter'),
 )
 COMPRESS_ENABLED = True
 
@@ -924,13 +929,11 @@ BANK_SWIFT_CODE = ''
 STRIPE_PUBLIC_KEY = ''
 STRIPE_PRIVATE_KEY = ''
 
-# Mailchimp
-MAILCHIMP_APIKEY = ''
-MAILCHIMP_COMMCARE_USERS_ID = ''
-MAILCHIMP_MASS_EMAIL_ID = ''
-
 SQL_REPORTING_DATABASE_URL = None
 UCR_DATABASE_URL = None
+
+# Override this in localsettings to specify custom reporting databases
+CUSTOM_DATABASES = {}
 
 # number of days since last access after which a saved export is considered unused
 SAVED_EXPORT_ACCESS_CUTOFF = 35
@@ -943,6 +946,10 @@ DROPBOX_KEY = ''
 DROPBOX_SECRET = ''
 DROPBOX_APP_NAME = ''
 
+# Amazon S3
+S3_ACCESS_KEY = None
+S3_SECRET_KEY = None
+
 # Supervisor RPC
 SUPERVISOR_RPC_ENABLED = False
 SUBSCRIPTION_USERNAME = None
@@ -952,9 +959,15 @@ ENVIRONMENT_HOSTS = {
     'pillowtop': ['localhost']
 }
 
+DATADOG_API_KEY = None
+DATADOG_APP_KEY = None
+
 # Override with the PEM export of an RSA private key, for use with any
 # encryption or signing workflows.
 HQ_PRIVATE_KEY = None
+
+
+KAFKA_URL = 'localhost:9092'
 
 try:
     # try to see if there's an environmental variable set for local_settings
@@ -964,7 +977,8 @@ try:
         from settings_demo import *
     else:
         from localsettings import *
-        if globals().get("FIX_LOGGER_ERROR_OBFUSCATION"):
+        _fix_logger_obfuscation = globals().get("FIX_LOGGER_ERROR_OBFUSCATION")
+        if _fix_logger_obfuscation:
             # this is here because the logging config cannot import
             # corehq.util.log.HqAdminEmailHandler, for example, if there
             # is a syntax error in any module imported by corehq/__init__.py
@@ -974,14 +988,15 @@ try:
             # related to email logging.
             for handler in LOGGING["handlers"].values():
                 if handler["class"].startswith("corehq."):
-                    print "{} logger is being changed to {}".format(
-                        handler['class'],
-                        'logging.StreamHandler'
-                    )
+                    if _fix_logger_obfuscation != 'quiet':
+                        print "{} logger is being changed to {}".format(
+                            handler['class'],
+                            'logging.StreamHandler'
+                        )
                     handler["class"] = "logging.StreamHandler"
 except ImportError:
-   # fallback in case nothing else is found - used for readthedocs
-   from dev_settings import *
+    # fallback in case nothing else is found - used for readthedocs
+    from dev_settings import *
 
 if DEBUG:
     try:
@@ -993,6 +1008,8 @@ if DEBUG:
         INSTALLED_APPS = INSTALLED_APPS + (
             'luna',
         )
+
+    INSTALLED_APPS = INSTALLED_APPS + ('corehq.apps.mocha',)
 
     import warnings
     warnings.simplefilter('default')
@@ -1030,8 +1047,7 @@ INDICATOR_CONFIG = {
 ####### Couch Forms & Couch DB Kit Settings #######
 from settingshelper import (
     get_dynamic_db_settings,
-    make_couchdb_tuples,
-    get_extra_couchdbs,
+    CouchSettingsHelper,
     SharedDriveConfiguration
 )
 
@@ -1044,22 +1060,24 @@ _dynamic_db_settings = get_dynamic_db_settings(
 )
 
 # create local server and database configs
-COUCH_SERVER = _dynamic_db_settings["COUCH_SERVER"]
 COUCH_DATABASE = _dynamic_db_settings["COUCH_DATABASE"]
 
 NEW_USERS_GROUPS_DB = 'users'
-USERS_GROUPS_DB = None
+USERS_GROUPS_DB = NEW_USERS_GROUPS_DB
 
+NEW_FIXTURES_DB = 'fixtures'
+FIXTURES_DB = NEW_FIXTURES_DB
+
+NEW_DOMAINS_DB = 'domains'
+DOMAINS_DB = None
 
 COUCHDB_APPS = [
     'api',
     'app_manager',
     'appstore',
-    'orgs',
     'builds',
     'case',
     'casegroups',
-    'callcenter',
     'cleanup',
     'cloudcare',
     'commtrack',
@@ -1073,11 +1091,9 @@ COUCHDB_APPS = [
     'ctable',
     'custom_data_fields',
     'hqadmin',
-    'domain',
     'ext',
     'facilities',
     'fluff_filter',
-    'fixtures',
     'hqcase',
     'hqmedia',
     'hope',
@@ -1137,18 +1153,26 @@ COUCHDB_APPS = [
     ('mc', 'fluff-mc'),
     ('m4change', 'm4change'),
     ('export', 'meta'),
-    'tdhtesting',
+    ('callcenter', 'meta'),
 
     # users and groups
     ('groups', USERS_GROUPS_DB),
     ('users', USERS_GROUPS_DB),
+
+    # fixtures
+    ('fixtures', FIXTURES_DB),
+
+    # domains
+    ('domain', DOMAINS_DB),
 ]
 
 COUCHDB_APPS += LOCAL_COUCHDB_APPS
 
-COUCHDB_DATABASES = make_couchdb_tuples(COUCHDB_APPS, COUCH_DATABASE)
-EXTRA_COUCHDB_DATABASES = get_extra_couchdbs(COUCHDB_APPS, COUCH_DATABASE,
-                                             [NEW_USERS_GROUPS_DB])
+COUCH_SETTINGS_HELPER = CouchSettingsHelper(COUCH_DATABASE, COUCHDB_APPS, [
+    NEW_USERS_GROUPS_DB, NEW_FIXTURES_DB, NEW_DOMAINS_DB,
+])
+COUCHDB_DATABASES = COUCH_SETTINGS_HELPER.make_couchdb_tuples()
+EXTRA_COUCHDB_DATABASES = COUCH_SETTINGS_HELPER.get_extra_couchdbs()
 
 INSTALLED_APPS += LOCAL_APPS
 
@@ -1215,16 +1239,18 @@ SMS_HANDLERS = [
 ]
 
 SMS_LOADED_BACKENDS = [
-    "corehq.apps.unicel.api.UnicelBackend",
-    "corehq.apps.mach.api.MachBackend",
-    "corehq.apps.tropo.api.TropoBackend",
-    "corehq.apps.sms.backend.http_api.HttpBackend",
-    "corehq.apps.telerivet.models.TelerivetBackend",
-    "corehq.apps.sms.test_backend.TestSMSBackend",
+    "corehq.messaging.smsbackends.unicel.api.UnicelBackend",
+    "corehq.messaging.smsbackends.mach.api.MachBackend",
+    "corehq.messaging.smsbackends.tropo.api.TropoBackend",
+    "corehq.messaging.smsbackends.http.api.HttpBackend",
+    "corehq.messaging.smsbackends.telerivet.models.TelerivetBackend",
+    "corehq.messaging.smsbackends.test.api.TestSMSBackend",
     "corehq.apps.sms.backend.test.TestBackend",
-    "corehq.apps.grapevine.api.GrapevineBackend",
-    "corehq.apps.twilio.models.TwilioBackend",
-    "corehq.apps.megamobile.api.MegamobileBackend",
+    "corehq.messaging.smsbackends.grapevine.api.GrapevineBackend",
+    "corehq.messaging.smsbackends.twilio.models.TwilioBackend",
+    "corehq.messaging.smsbackends.megamobile.api.MegamobileBackend",
+    "corehq.messaging.smsbackends.smsgh.models.SMSGHBackend",
+    "corehq.messaging.smsbackends.apposit.models.AppositBackend",
 ]
 
 IVR_BACKEND_MAP = {
@@ -1278,9 +1304,6 @@ PILLOWTOPS = {
         'corehq.pillows.sofabed.FormDataPillow',
         'corehq.pillows.sofabed.CaseDataPillow',
     ],
-    'phonelog': [
-        'corehq.pillows.log.PhoneLogPillow',
-    ],
     'core_ext': [
         'corehq.pillows.reportcase.ReportCasePillow',
         'corehq.pillows.reportxform.ReportXFormPillow',
@@ -1292,10 +1315,7 @@ PILLOWTOPS = {
     ],
     'fluff': [
         'custom.bihar.models.CareBiharFluffPillow',
-        'custom.opm.models.OpmCaseFluffPillow',
         'custom.opm.models.OpmUserFluffPillow',
-        'custom.opm.models.OpmFormFluffPillow',
-        'custom.opm.models.VhndAvailabilityFluffPillow',
         'custom.apps.cvsu.models.UnicefMalawiFluffPillow',
         'custom.reports.mc.models.MalariaConsortiumFluffPillow',
         'custom.m4change.models.AncHmisCaseFluffPillow',
@@ -1316,25 +1336,43 @@ PILLOWTOPS = {
         'custom.world_vision.models.WorldVisionMotherFluffPillow',
         'custom.world_vision.models.WorldVisionChildFluffPillow',
         'custom.world_vision.models.WorldVisionHierarchyFluffPillow',
-        'custom.tdh.models.TDHEnrollChildFluffPillow',
-        'custom.tdh.models.TDHInfantClassificationFluffPillow',
-        'custom.tdh.models.TDHInfantTreatmentFluffPillow',
-        'custom.tdh.models.TDHNewbornClassificationFluffPillow',
-        'custom.tdh.models.TDHNewbornTreatmentFluffPillow',
-        'custom.tdh.models.TDHChildClassificationFluffPillow',
-        'custom.tdh.models.TDHChildTreatmentFluffPillow',
         'custom.succeed.models.UCLAPatientFluffPillow',
     ],
     'mvp_indicators': [
         'mvp_docs.pillows.MVPFormIndicatorPillow',
         'mvp_docs.pillows.MVPCaseIndicatorPillow',
     ],
+    'experimental': [
+        {
+            'name': 'DefaultChangeFeedPillow',
+            'class': 'corehq.apps.change_feed.pillow.ChangeFeedPillow',
+            'instance': 'corehq.apps.change_feed.pillow.get_default_couch_db_change_feed_pillow',
+        },
+        {
+            'name': 'KafkaCaseConsumerPillow',
+            'class': 'pillowtop.pillow.interface.ConstructedPillow',
+            'instance': 'corehq.apps.change_feed.consumer.pillow.get_demo_case_consumer_pillow',
+        },
+        {
+            'name': 'LoggingPythonDemoPillow',
+            'class': 'corehq.apps.change_feed.consumer.pillow.LoggingPythonPillow',
+            'instance': 'corehq.apps.change_feed.consumer.pillow.get_demo_python_pillow_consumer',
+        },
+
+    ]
 }
 
 
 STATIC_UCR_REPORTS = [
     os.path.join('custom', '_legacy', 'mvp', 'ucr', 'reports', 'deidentified_va_report.json'),
-    os.path.join('custom', 'abt', 'reports', 'incident_report.json')
+    os.path.join('custom', 'abt', 'reports', 'incident_report.json'),
+    os.path.join('custom', 'abt', 'reports', 'sms_indicator_report.json'),
+    os.path.join('custom', 'abt', 'reports', 'spray_progress_country.json'),
+    os.path.join('custom', 'abt', 'reports', 'spray_progress_level_1.json'),
+    os.path.join('custom', 'abt', 'reports', 'spray_progress_level_2.json'),
+    os.path.join('custom', 'abt', 'reports', 'spray_progress_level_3.json'),
+    os.path.join('custom', 'abt', 'reports', 'spray_progress_level_4.json'),
+    os.path.join('custom', 'abt', 'reports', 'supervisory_report.json'),
 ]
 
 
@@ -1347,6 +1385,9 @@ STATIC_DATA_SOURCES = [
     os.path.join('custom', 'abt', 'reports', 'data_sources', 'sms.json'),
     os.path.join('custom', 'abt', 'reports', 'data_sources', 'supervisory.json'),
     os.path.join('custom', '_legacy', 'mvp', 'ucr', 'reports', 'data_sources', 'va_datasource.json'),
+    os.path.join('custom', 'reports', 'mc', 'data_sources', 'malaria_consortium.json'),
+    os.path.join('custom', 'reports', 'mc', 'data_sources', 'weekly_forms.json'),
+    os.path.join('custom', 'apps', 'cvsu', 'data_sources', 'unicef_malawi.json')
 ]
 
 
@@ -1357,16 +1398,13 @@ for k, v in LOCAL_PILLOWTOPS.items():
 
 COUCH_CACHE_BACKENDS = [
     'corehq.apps.cachehq.cachemodels.DomainGenerationCache',
-    'corehq.apps.cachehq.cachemodels.OrganizationGenerationCache',
     'corehq.apps.cachehq.cachemodels.UserGenerationCache',
     'corehq.apps.cachehq.cachemodels.GroupGenerationCache',
     'corehq.apps.cachehq.cachemodels.UserRoleGenerationCache',
-    'corehq.apps.cachehq.cachemodels.TeamGenerationCache',
     'corehq.apps.cachehq.cachemodels.ReportGenerationCache',
     'corehq.apps.cachehq.cachemodels.DefaultConsumptionGenerationCache',
     'corehq.apps.cachehq.cachemodels.LocationGenerationCache',
     'corehq.apps.cachehq.cachemodels.DomainInvitationGenerationCache',
-    'corehq.apps.cachehq.cachemodels.CommtrackConfigGenerationCache',
     'corehq.apps.cachehq.cachemodels.UserReportsDataSourceCache',
     'corehq.apps.cachehq.cachemodels.UserReportsReportConfigCache',
     'dimagi.utils.couch.cache.cache_core.gen.GlobalCache',
@@ -1407,6 +1445,9 @@ CUSTOM_UCR_EXPRESSIONS = [
     ('mvp_treatment_place_name', 'mvp.ucr.reports.expressions.treatment_place_name_expression'),
     ('mvp_death_place', 'mvp.ucr.reports.expressions.death_place_expression'),
     ('succeed_referenced_id', 'custom.succeed.expressions.succeed_referenced_id'),
+    ('location_type_name', 'corehq.apps.locations.ucr_expressions.location_type_name'),
+    ('location_parent_id', 'corehq.apps.locations.ucr_expressions.location_parent_id'),
+    ('cvsu_expression', 'custom.apps.cvsu.expressions.cvsu_expression')
 ]
 
 CUSTOM_MODULES = [
@@ -1414,6 +1455,10 @@ CUSTOM_MODULES = [
     'custom.ilsgateway',
     'custom.ewsghana',
 ]
+
+CUSTOM_DASHBOARD_PAGE_URL_NAMES = {
+    'ews-ghana': 'dashboard_page'
+}
 
 REMOTE_APP_NAMESPACE = "%(domain)s.commcarehq.org"
 
@@ -1463,8 +1508,8 @@ DOMAIN_MODULE_MAP = {
     'wvindia2': 'custom.world_vision',
     'pathways-india-mis': 'custom.care_pathways',
     'pathways-tanzania': 'custom.care_pathways',
-    'tdhtesting': 'custom.tdh',
-    'rec': 'custom.tdh'
+    'kemri': 'custom.openclinica',
+    'novartis': 'custom.openclinica',
 }
 
 CASEXML_FORCE_DOMAIN_CHECK = True
@@ -1482,7 +1527,7 @@ TRAVIS_TEST_GROUPS = (
         'facilities', 'fixtures', 'fluff_filter', 'formplayer',
         'formtranslate', 'fri', 'grapevine', 'groups', 'gsid', 'hope',
         'hqadmin', 'hqcase', 'hqcouchlog', 'hqmedia',
-        'care_pathways', 'colalife', 'common', 'compressor',
+        'care_pathways', 'colalife', 'common', 'compressor', 'smsbillables',
     ),
 )
 
@@ -1509,3 +1554,10 @@ if 'locmem' not in CACHES:
     CACHES['locmem'] = {'BACKEND': 'django.core.cache.backends.locmem.LocMemCache'}
 if 'dummy' not in CACHES:
     CACHES['dummy'] = {'BACKEND': 'django.core.cache.backends.dummy.DummyCache'}
+
+try:
+    from datadog import initialize
+except ImportError:
+    pass
+else:
+    initialize(DATADOG_API_KEY, DATADOG_APP_KEY)

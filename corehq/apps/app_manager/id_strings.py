@@ -262,6 +262,10 @@ def detail(module, detail_type):
     return u"m{module.id}_{detail_type}".format(module=module, detail_type=detail_type)
 
 
+def persistent_case_context_detail(module):
+    return detail(module, 'persistent_case_context')
+
+
 def fixture_detail(module):
     return detail(module, 'fixture_select')
 
@@ -279,16 +283,10 @@ def menu_id(module):
         return u"m{module.id}".format(module=module)
 
 
-def menu_root(module):
-    put_in_root = getattr(module, 'put_in_root', False)
-    if not put_in_root and getattr(module, 'root_module', False):
-        return menu_id(module.root_module)
-    else:
-        return None
-
-
-def form_command(form):
-    return u"m{module.id}-f{form.id}".format(module=form.get_module(), form=form)
+def form_command(form, module=None):
+    if not module:
+        module = form.get_module()
+    return u"m{module.id}-f{form.id}".format(module=module, form=form)
 
 
 def case_list_command(module):

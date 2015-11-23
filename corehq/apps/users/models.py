@@ -5,19 +5,23 @@ from __future__ import absolute_import
 import copy
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
+import logging
 import re
 
 from restkit.errors import NoMoreData
 from django.conf import settings
+from django.contrib.auth.models import User
 from django.core.urlresolvers import reverse
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.template.loader import render_to_string
 from django.utils.translation import ugettext as _
 from corehq.apps.app_manager.const import USERCASE_TYPE
-from corehq.apps.commtrack.dbaccessors import get_supply_point_case_by_location
+from corehq.apps.domain.dbaccessors import get_docs_in_domain_by_class
 from corehq.apps.hqcase.dbaccessors import get_case_ids_in_domain_by_owner
 from corehq.apps.sofabed.models import CaseData
+from corehq.elastic import es_wrapper
+from corehq.form_processor.interfaces.supply import SupplyInterface
 from dimagi.ext.couchdbkit import *
 from couchdbkit.resource import ResourceNotFound
 from corehq.util.view_utils import absolute_reverse
@@ -31,15 +35,14 @@ from dimagi.utils.decorators.memoized import memoized
 from dimagi.utils.make_uuid import random_hex
 from dimagi.utils.modules import to_function
 from corehq.util.quickcache import skippable_quickcache
-from casexml.apps.case.xml import V2
 from casexml.apps.case.mock import CaseBlock
 from casexml.apps.case.models import CommCareCase
 from corehq.apps.commtrack.const import USER_LOCATION_OWNER_MAP_TYPE
 from casexml.apps.phone.models import User as CaseXMLUser
-from corehq.apps.cachehq.mixins import CachedCouchDocumentMixin
+from corehq.apps.cachehq.mixins import CachedCouchDocumentMixin, QuickCachedDocumentMixin
 from corehq.apps.domain.shortcuts import create_user
 from corehq.apps.domain.utils import normalize_domain_name, domain_restricts_superusers
-from corehq.apps.domain.models import LicenseAgreement
+from corehq.apps.domain.models import Domain, LicenseAgreement
 from corehq.apps.users.util import (
     normalize_username,
     user_data_from_registration_form,
@@ -228,7 +231,7 @@ class UserRolePresets(object):
         return preset_map[preset]()
 
 
-class UserRole(Document):
+class UserRole(QuickCachedDocumentMixin, Document):
     domain = StringProperty()
     name = StringProperty()
     permissions = SchemaProperty(Permissions)
@@ -335,11 +338,15 @@ class UserRole(Document):
 
     @classmethod
     def role_choices(cls, domain):
-        return [(role.get_qualified_id(), role.name or '(No Name)') for role in [AdminUserRole(domain=domain)] + list(cls.by_domain(domain))]
+        return [(role.get_qualified_id(), role.name or '(No Name)') for role in
+                [AdminUserRole(domain=domain)] + list(cls.by_domain(domain))]
 
     @classmethod
     def commcareuser_role_choices(cls, domain):
-        return [('none','(none)')] + [(role.get_qualified_id(), role.name or '(No Name)') for role in list(cls.by_domain(domain))]
+        return [('none','(none)')] + [
+            (role.get_qualified_id(), role.name or '(No Name)')
+            for role in list(cls.by_domain(domain))
+        ]
 
     @property
     def ids_of_assigned_users(self):
@@ -435,6 +442,7 @@ class DomainMembership(Membership):
         return super(DomainMembership, cls).wrap(data)
 
     @property
+    @memoized
     def role(self):
         if self.is_admin:
             return AdminUserRole(self.domain)
@@ -950,6 +958,7 @@ class CouchUser(Document, DjangoUserMixin, IsMemberOfMixin, UnicodeMixIn, EulaMi
         except User.DoesNotExist:
             pass
         super(CouchUser, self).delete() # Call the "real" delete() method.
+        from .signals import couch_user_post_save
         couch_user_post_save.send_robust(sender='couch_user', couch_user=self)
 
     def delete_phone_number(self, phone_number):
@@ -1282,6 +1291,7 @@ class CouchUser(Document, DjangoUserMixin, IsMemberOfMixin, UnicodeMixIn, EulaMi
 
             super(CouchUser, self).save(**params)
 
+        from .signals import couch_user_post_save
         results = couch_user_post_save.send_robust(sender='couch_user', couch_user=self)
         for result in results:
             # Second argument is None if there was no error
@@ -1289,10 +1299,8 @@ class CouchUser(Document, DjangoUserMixin, IsMemberOfMixin, UnicodeMixIn, EulaMi
                 notify_exception(
                     None,
                     message="Error occured while syncing user %s: %s" %
-                            (self.username, str(result[1]))
+                            (self.username, repr(result[1]))
                 )
-
-
 
     @classmethod
     def django_user_post_save_signal(cls, sender, django_user, created, max_tries=3):
@@ -1408,7 +1416,7 @@ class CommCareUser(CouchUser, SingleMembershipMixin, CommCareMobileContactMixin)
     def save(self, **params):
         super(CommCareUser, self).save(**params)
 
-        from corehq.apps.users.signals import commcare_user_post_save
+        from .signals import commcare_user_post_save
         results = commcare_user_post_save.send_robust(sender='couch_user', couch_user=self)
         for result in results:
             # Second argument is None if there was no error
@@ -1416,7 +1424,7 @@ class CommCareUser(CouchUser, SingleMembershipMixin, CommCareMobileContactMixin)
                 notify_exception(
                     None,
                     message="Error occured while syncing user %s: %s" %
-                            (self.username, str(result[1]))
+                            (self.username, repr(result[1]))
                 )
 
     @property
@@ -1538,7 +1546,7 @@ class CommCareUser(CouchUser, SingleMembershipMixin, CommCareMobileContactMixin)
         return create_or_update_safe(
             domain=xform.domain,
             user_data=user_data_from_registration_form(xform),
-            **dict([(arg, xform.form[arg]) for arg in (
+            **dict([(arg, xform.form_data[arg]) for arg in (
                 'username',
                 'password',
                 'uuid',
@@ -1632,32 +1640,9 @@ class CommCareUser(CouchUser, SingleMembershipMixin, CommCareMobileContactMixin)
         """
         return CaseData.objects.filter(user_id=self._id).count()
 
-    def location_group_ids(self):
-        """
-        Return generated ID's that represent the virtual
-        groups used to send location data in the restore
-        payload.
-        """
-        def get_sharing_id(loc):
-            return loc.case_sharing_group_object(self._id)._id
-
-        if self.sql_location.location_type.view_descendants:
-            locs = (self.sql_location.get_descendants(include_self=True)
-                                     .filter(location_type__shares_cases=True))
-            return map(get_sharing_id, locs)
-        elif self.sql_location.location_type.shares_cases:
-            return [get_sharing_id(self.sql_location)]
-        else:
-            return []
-
     def get_owner_ids(self):
-        from corehq.apps.groups.models import Group
-
         owner_ids = [self.user_id]
-        owner_ids.extend(Group.by_user(self, wrap=False))
-
-        if self.project.uses_locations and self.location:
-            owner_ids.extend(self.location_group_ids())
+        owner_ids.extend([g._id for g in self.get_case_sharing_groups()])
         return owner_ids
 
     def retire(self):
@@ -1676,7 +1661,8 @@ class CommCareUser(CouchUser, SingleMembershipMixin, CommCareMobileContactMixin)
 
         for form_id_list in chunked(self.get_forms(wrap=False, include_docs=False), 50):
             tag_forms_as_deleted_rebuild_associated_cases.delay(
-                form_id_list, deletion_id, deleted_cases=deleted_cases)
+                self.user_id, self.domain, form_id_list, deletion_id, deleted_cases=deleted_cases
+            )
 
         for phone_number in self.get_verified_numbers(True).values():
             phone_number.retire(deletion_id)
@@ -1706,19 +1692,12 @@ class CommCareUser(CouchUser, SingleMembershipMixin, CommCareMobileContactMixin)
 
     def get_case_sharing_groups(self):
         from corehq.apps.groups.models import Group
-        # get faked location group object
+        # get faked location group objects
         groups = []
-        if self.location and self.location.location_type_object.shares_cases:
-            if self.location.location_type_object.view_descendants:
-                for loc in self.sql_location.get_descendants():
-                    groups.append(loc.case_sharing_group_object(
-                        self._id,
-                    ))
-
-            groups.append(self.sql_location.case_sharing_group_object(self._id))
+        if self.sql_location:
+            groups.extend(self.sql_location.get_case_sharing_groups(self._id))
 
         groups += [group for group in Group.by_user(self) if group.case_sharing]
-
         return groups
 
     @classmethod
@@ -1800,18 +1779,17 @@ class CommCareUser(CouchUser, SingleMembershipMixin, CommCareMobileContactMixin)
         Set the location, and all important user data, for
         the user.
         """
-        from corehq.apps.commtrack.models import SupplyPointCase
         from corehq.apps.fixtures.models import UserFixtureType
 
-        self.user_data['commcare_location_id'] = location._id
+        self.user_data['commcare_location_id'] = location.location_id
 
         if not location.location_type_object.administrative:
             # just need to trigger a get or create to make sure
             # this exists, otherwise things blow up
-            SupplyPointCase.get_or_create_by_location(location)
+            sp = SupplyInterface(self.domain).get_or_create_by_location(location)
 
             self.user_data.update({
-                'commtrack-supply-point': location.sql_location.supply_point_id
+                'commtrack-supply-point': sp.case_id
             })
 
         if self.project.supports_multiple_locations_per_user:
@@ -1827,10 +1805,10 @@ class CommCareUser(CouchUser, SingleMembershipMixin, CommCareMobileContactMixin)
 
         self.user_data.update({
             'commcare_primary_case_sharing_id':
-            location._id
+            location.group_id
         })
 
-        self.location_id = location._id
+        self.location_id = location.location_id
         self.update_fixture_status(UserFixtureType.LOCATION)
         self.save()
 
@@ -1849,14 +1827,17 @@ class CommCareUser(CouchUser, SingleMembershipMixin, CommCareMobileContactMixin)
         self.save()
 
     @property
-    def _locations(self):
+    def locations(self):
         """
-        Hidden access to a users delgate location list.
+        This method is only used for domains with the multiple
+        locations per user flag set. It will error if you try
+        to call it on a normal domain.
+        """
+        if not self.project.supports_multiple_locations_per_user:
+            raise InvalidLocationConfig(
+                "Attempting to access multiple locations for a user in a domain that does not support this."
+            )
 
-        Should be removed (and this code moved back under
-        self.location) sometime after migration and things
-        are settled.
-        """
         from corehq.apps.locations.models import Location
         from corehq.apps.commtrack.models import SupplyPointCase
 
@@ -1880,20 +1861,6 @@ class CommCareUser(CouchUser, SingleMembershipMixin, CommCareMobileContactMixin)
 
         return list(_gen())
 
-    @property
-    def locations(self):
-        """
-        This method is only used for domains with the multiple
-        locations per user flag set. It will error if you try
-        to call it on a normal domain.
-        """
-        if not self.project.supports_multiple_locations_per_user:
-            raise InvalidLocationConfig(
-                "Attempting to access multiple locations for a user in a domain that does not support this."
-            )
-
-        return self._locations
-
     def supply_point_index_mapping(self, supply_point, clear=False):
         from corehq.apps.commtrack.exceptions import (
             LinkedSupplyPointNotFoundError
@@ -1901,10 +1868,10 @@ class CommCareUser(CouchUser, SingleMembershipMixin, CommCareMobileContactMixin)
 
         if supply_point:
             return {
-                'supply_point-' + supply_point._id:
+                'supply_point-' + supply_point.case_id:
                 (
                     supply_point.type,
-                    supply_point._id if not clear else ''
+                    supply_point.case_id if not clear else ''
                 )
             }
         else:
@@ -1919,9 +1886,7 @@ class CommCareUser(CouchUser, SingleMembershipMixin, CommCareMobileContactMixin)
         This will dynamically create a supply point if the supply point isn't found.
         """
         # todo: the dynamic supply point creation is bad and should be removed.
-        from corehq.apps.commtrack.models import SupplyPointCase
-
-        sp = SupplyPointCase.get_or_create_by_location(location)
+        sp = SupplyInterface(self.domain).get_or_create_by_location(location)
 
         if not location.location_type_object.administrative:
             from corehq.apps.commtrack.util import submit_mapping_case_block
@@ -1944,16 +1909,15 @@ class CommCareUser(CouchUser, SingleMembershipMixin, CommCareMobileContactMixin)
         Remove a single location from the case delagate access.
         """
 
-        sp = get_supply_point_case_by_location(location)
+        sp = SupplyInterface(self.domain).get_by_location(location)
 
         mapping = self.get_location_map_case()
 
         if not location.location_type_object.administrative:
-            if mapping and location._id in [loc._id for loc in self.locations]:
+            if mapping and location.location_id in [loc.location_id for loc in self.locations]:
                 caseblock = CaseBlock(
                     create=False,
                     case_id=mapping._id,
-                    version=V2,
                     index=self.supply_point_index_mapping(sp, True)
                 )
 
@@ -1973,11 +1937,9 @@ class CommCareUser(CouchUser, SingleMembershipMixin, CommCareMobileContactMixin)
         Submit the case blocks creating the delgate case access
         for the location(s).
         """
-        from corehq.apps.commtrack.models import SupplyPointCase
-
         if self.project.supports_multiple_locations_per_user:
-            new_locs_set = set([loc._id for loc in locations])
-            old_locs_set = set([loc._id for loc in self.locations])
+            new_locs_set = set([loc.location_id for loc in locations])
+            old_locs_set = set([loc.location_id for loc in self.locations])
 
             if new_locs_set == old_locs_set:
                 # don't do anything if the list passed is the same
@@ -1993,7 +1955,7 @@ class CommCareUser(CouchUser, SingleMembershipMixin, CommCareMobileContactMixin)
         index = {}
         for location in locations:
             if not location.location_type_object.administrative:
-                sp = get_supply_point_case_by_location(location)
+                sp = SupplyInterface(self.domain).get_by_location(location)
                 index.update(self.supply_point_index_mapping(sp))
 
         from corehq.apps.commtrack.util import location_map_case_id
@@ -2001,7 +1963,6 @@ class CommCareUser(CouchUser, SingleMembershipMixin, CommCareMobileContactMixin)
             create=True,
             case_type=USER_LOCATION_OWNER_MAP_TYPE,
             case_id=location_map_case_id(self),
-            version=V2,
             owner_id=self._id,
             index=index
         )
@@ -2074,10 +2035,6 @@ class OrgMembershipMixin(DocumentSchema):
     def organizations(self):
         return [om.organization for om in self.org_memberships]
 
-    def get_organizations(self):
-        from corehq.apps.orgs.models import Organization
-        return filter(None, [Organization.get_by_name(org) for org in self.organizations])
-
     def is_member_of_org(self, org_name_or_model):
         """
         takes either a organization name or an organization object and returns whether the user is part of that org
@@ -2094,33 +2051,6 @@ class OrgMembershipMixin(DocumentSchema):
                 return om
         return None
 
-    def add_org_membership(self, org, **kwargs):
-        from corehq.apps.orgs.models import Organization
-        if self.get_org_membership(org):
-            return
-
-        organization = Organization.get_by_name(org, strict=True)
-        if not organization:
-            raise OrgMembershipError("Cannot add org membership -- Organization %s does not exist" % org)
-
-        kwargs.pop("organization", None) # prevents next line from raising an error due to two organization values being given to OrgMembership
-        self.org_memberships.append(OrgMembership(organization=org, **kwargs))
-
-    def delete_org_membership(self, org, create_record=False):
-        record = None
-        for i, om in enumerate(self.org_memberships):
-            if om.organization == org:
-                if create_record:
-                    record = OrgRemovalRecord(org_membership = om, user_id=self.user_id)
-                del self.org_memberships[i]
-                break
-        if create_record:
-            if record:
-                record.save()
-                return record
-            else:
-                raise OrgMembershipError("Cannot delete org membership -- Organization %s does not exist" % org)
-
     def is_org_admin(self, org):
         om = self.get_org_membership(org)
         return om and om.is_admin
@@ -2128,19 +2058,6 @@ class OrgMembershipMixin(DocumentSchema):
     def is_member_of_team(self, org, team_id):
         om = self.get_org_membership(org)
         return om and team_id in om.team_ids
-
-    def add_to_team(self, org, team_id):
-        om = self.get_org_membership(org)
-        if not om:
-            raise OrgMembershipError("Cannot add team -- %s is not a member of the %s organization" %
-                                     (self.username, org))
-
-        from corehq.apps.orgs.models import Team
-        team = Team.get(team_id)
-        if not team or team.organization != org:
-            raise OrgMembershipError("Cannot add team -- Team(%s) does not exist in organization %s" % (team_id, org))
-
-        om.team_ids.append(team_id)
 
     def remove_from_team(self, org, team_id):
         om = self.get_org_membership(org)
@@ -2170,17 +2087,6 @@ class WebUser(CouchUser, MultiMembershipMixin, OrgMembershipMixin, CommCareMobil
     def is_global_admin(self):
         # override this function to pass global admin rights off to django
         return self.is_superuser
-
-    @classmethod
-    def by_organization(cls, org, team_id=None):
-        key = [org] if team_id is None else [org, team_id]
-        users = cls.view("users/by_org_and_team",
-            startkey=key,
-            endkey=key + [{}],
-            include_docs=True,
-        ).all()
-        # return a list of users with the duplicates removed
-        return dict([(u.get_id, u) for u in users]).values()
 
     @classmethod
     def create(cls, domain, username, password, email=None, uuid='', date='', **kwargs):
@@ -2217,33 +2123,8 @@ class WebUser(CouchUser, MultiMembershipMixin, OrgMembershipMixin, CommCareMobil
     def get_language_code(self):
         return self.language
 
-    def get_teams(self, ids_only=False):
-        from corehq.apps.orgs.models import Team
-        teams = []
-
-        def get_valid_teams(team_ids):
-            team_db = Team.get_db()
-            for t_id in team_ids:
-                if team_db.doc_exist(t_id):
-                    yield Team.get(t_id)
-                else:
-                    logging.info("Note: team %s does not exist for %s" % (t_id, self))
-
-        for om in self.org_memberships:
-            if not ids_only:
-                teams.extend(list(get_valid_teams(om.team_ids)))
-            else:
-                teams.extend(om.team_ids)
-        return teams
-
     def get_domains(self):
-        domains = [dm.domain for dm in self.domain_memberships]
-        for team in self.get_teams():
-            team_domains = [dm.domain for dm in team.domain_memberships]
-            for domain in team_domains:
-                if domain not in domains:
-                    domains.append(domain)
-        return domains
+        return [dm.domain for dm in self.domain_memberships]
 
     @memoized
     def has_permission(self, domain, permission, data=None):
@@ -2259,11 +2140,7 @@ class WebUser(CouchUser, MultiMembershipMixin, OrgMembershipMixin, CommCareMobil
         if dm:
             dm_list.append([dm, ''])
 
-        for team in self.get_teams():
-            if team.get_domain_membership(domain) and team.get_domain_membership(domain).role:
-                dm_list.append([team.get_domain_membership(domain), '(' + team.name + ')'])
-
-        #now find out which dm has the highest permissions
+        # now find out which dm has the highest permissions
         if dm_list:
             role = self.total_domain_membership(dm_list, domain)
             dm = CustomDomainMembership(domain=domain, custom_role=role)
@@ -2293,11 +2170,7 @@ class WebUser(CouchUser, MultiMembershipMixin, OrgMembershipMixin, CommCareMobil
         if dm:
             dm_list.append([dm, ''])
 
-        for team in self.get_teams():
-            if team.get_domain_membership(domain) and team.get_domain_membership(domain).role:
-                dm_list.append([team.get_domain_membership(domain), ' (' + team.name + ')'])
-
-        #now find out which dm has the highest permissions
+        # now find out which dm has the highest permissions
         if dm_list:
             return self.total_domain_membership(dm_list, domain)
         else:
@@ -2438,7 +2311,7 @@ class DomainRequest(models.Model):
 
     @classmethod
     def by_domain(cls, domain, is_approved=False):
-        return DomainRequest.objects.filter(domain=domain)
+        return DomainRequest.objects.filter(domain=domain, is_approved=is_approved)
 
     @classmethod
     def by_email(cls, domain, email, is_approved=False):
@@ -2465,7 +2338,7 @@ class DomainRequest(models.Model):
             'url': absolute_reverse("web_users", args=[self.domain]),
         }
         recipients = {u.get_email() for u in
-            WebUser.get_users_by_permission(self.domain, 'edit_web_users')}
+            WebUser.get_admins_by_domain(self.domain)}
         text_content = render_to_string("users/email/request_domain_access.txt", params)
         html_content = render_to_string("users/email/request_domain_access.html", params)
         subject = _('Request from %s to join %s') % (self.full_name, domain_name)
@@ -2530,12 +2403,10 @@ class DomainInvitation(CachedCouchDocumentMixin, Invitation):
     def by_domain(cls, domain, is_active=True):
         key = [domain]
 
-        return cls.view("users/open_invitations_by_domain",
-            reduce=False,
-            startkey=key,
-            endkey=key + [{}],
-            include_docs=True,
-        ).all()
+        return filter(
+            lambda domain_invitation: not domain_invitation.is_accepted,
+            get_docs_in_domain_by_class(domain, cls)
+        )
 
     @classmethod
     def by_email(cls, email, is_active=True):
@@ -2560,15 +2431,6 @@ class DomainRemovalRecord(DeleteRecord):
         user.add_domain_membership(**self.domain_membership._doc)
         user.save()
 
-class OrgRemovalRecord(DeleteRecord):
-    user_id = StringProperty()
-    org_membership = SchemaProperty(OrgMembership)
-
-    def undo(self):
-        user = WebUser.get_by_user_id(self.user_id)
-        some_args = self.org_membership._doc
-        user.add_org_membership(some_args["organization"], **some_args)
-        user.save()
 
 class UserCache(object):
     def __init__(self):
@@ -2583,7 +2445,3 @@ class UserCache(object):
             user = CouchUser.get_by_user_id(user_id)
             self.cache[user_id] = user
             return user
-
-
-from .signals import *
-from corehq.apps.domain.models import Domain

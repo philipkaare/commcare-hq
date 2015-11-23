@@ -4,6 +4,7 @@ from corehq.apps.hqwebapp.forms import BulkUploadForm
 from corehq.apps.hqwebapp.tasks import send_html_email_async
 from dimagi.utils.decorators.memoized import memoized
 from django.contrib import messages
+from django.contrib.auth import authenticate, login
 from django.contrib.auth.views import redirect_to_login
 from django.core.urlresolvers import reverse
 from django.conf import settings
@@ -21,6 +22,8 @@ from corehq.apps.users.models import Invitation, CouchUser, WebUser, DomainInvit
 from Crypto.PublicKey import RSA
 from Crypto.Hash import SHA256
 from Crypto.Signature import PKCS1_PSS
+
+from corehq.apps.analytics.tasks import track_workflow
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +73,10 @@ class InvitationView(object):
         username = self.request.user.username
         # Add zero-width space for better line breaking
         username = username.replace("@", "&#x200b;@")
-        return {'formatted_username': username}
+        return {
+            'create_domain': False,
+            'formatted_username': username,
+        }
 
     def validate_invitation(self, invitation):
         pass
@@ -162,6 +168,9 @@ class InvitationView(object):
             if request.method == "POST":
                 couch_user = CouchUser.from_django_user(request.user)
                 self._invite(invitation, couch_user)
+                track_workflow(request.couch_user.get_email(),
+                               "Current user accepted a project invitation",
+                               {"Current user accepted a project invitation": "yes"})
                 return HttpResponseRedirect(self.redirect_to_on_success)
             else:
                 mobile_user = CouchUser.from_django_user(request.user).is_commcare_user()
@@ -177,10 +186,19 @@ class InvitationView(object):
                     # create the new user
                     user = activate_new_user(form)
                     user.save()
-                    messages.success(request, _("User account for %s created! You may now login.")
-                                                % form.cleaned_data["email"])
+                    messages.success(request, _("User account for %s created!") % form.cleaned_data["email"])
                     self._invite(invitation, user)
-                    return HttpResponseRedirect(reverse("login"))
+                    authenticated = authenticate(username=form.cleaned_data["email"],
+                                                 password=form.cleaned_data["password"])
+                    if authenticated is not None and authenticated.is_active:
+                        login(request, authenticated)
+                    if isinstance(invitation, DomainInvitation):
+                        track_workflow(request.POST['email'],
+                                       "New User Accepted a project invitation",
+                                       {"New User Accepted a project invitation": "yes"})
+                        return HttpResponseRedirect(reverse("domain_homepage", args=[invitation.domain]))
+                    else:
+                        return HttpResponseRedirect(reverse("homepage"))
             else:
                 if isinstance(invitation, DomainInvitation):
                     if CouchUser.get_by_username(invitation.email):
@@ -216,10 +234,6 @@ def sidebar_to_dropdown(sidebar_items, domain=None, current_url_name=None):
             'show_in_dropdown': True,
             'subpages': [{'title': <function commcare_username at 0x109869488>,
                           'urlname': 'edit_commcare_user'},
-                         {'show_in_dropdown': True,
-                          'show_in_first_level': True,
-                          'title': u'New Mobile Worker',
-                          'urlname': 'add_commcare_account'},
                          {'title': u'Bulk Upload',
                           'urlname': 'upload_commcare_users'},
                          {'title': 'Confirm Billing Information',],
@@ -250,12 +264,6 @@ def sidebar_to_dropdown(sidebar_items, domain=None, current_url_name=None):
           'is_header': False,
           'title': u'Mobile Workers',
           'url': '/a/sravan-test/settings/users/commcare/'},
-         {'data_id': None,
-          'html': None,
-          'is_divider': False,
-          'is_header': False,
-          'title': u'New Mobile Worker',
-          'url': '/a/sravan-test/settings/users/commcare/add_commcare_account/'},
          {'data_id': None,
           'html': None,
           'is_divider': False,

@@ -2,7 +2,6 @@ import uuid
 from django.contrib.auth.models import User
 from django.test import TestCase
 from casexml.apps.case.mock import CaseBlock
-from casexml.apps.case.models import CommCareCase
 from casexml.apps.case.util import post_case_blocks
 from casexml.apps.case.xml import V2
 from casexml.apps.phone.restore import RestoreConfig, RestoreParams
@@ -34,10 +33,9 @@ class OtaRestoreBugTest(TestCase):
                 case_type='duck',
                 user_id=user._id,
                 owner_id=user._id,
-                version=V2,
             ).as_xml()
-            post_case_blocks([case_block], {'domain': domain})
-            return CommCareCase.get(case_id)
+            _, [case] = post_case_blocks([case_block], {'domain': domain})
+            return case
 
         good_case = _submit_case(good_domain)
 

@@ -332,7 +332,7 @@ class OPMCaseRow(object):
                     else:
                         kwargs = {'months_before': 1}
                     return any(
-                        form.xpath('form/pregnancy_questions/attendance_vhnd') == '1'
+                        form.get_data('form/pregnancy_questions/attendance_vhnd') == '1'
                         for form in self.filtered_forms(BIRTH_PREP_XMLNS, **kwargs)
                     )
                 return _legacy_method() or _new_method()
@@ -348,7 +348,7 @@ class OPMCaseRow(object):
                 return True
             else:
                 return any(
-                    form.xpath(self.child_xpath('form/child_{num}/child{num}_attendance_vhnd')) == '1'
+                    form.get_data(self.child_xpath('form/child_{num}/child{num}_attendance_vhnd')) == '1'
                     for form in self.filtered_forms(CHILDREN_FORMS, 1)
                 )
 
@@ -362,7 +362,7 @@ class OPMCaseRow(object):
 
         def _from_forms(filter_kwargs):
             return any(
-                form.xpath('form/pregnancy_questions/mother_weight') == '1'
+                form.get_data('form/pregnancy_questions/mother_weight') == '1'
                 for form in self.filtered_forms(BIRTH_PREP_XMLNS, **filter_kwargs)
             )
 
@@ -423,7 +423,7 @@ class OPMCaseRow(object):
 
             xpath = self.child_xpath('form/child_{num}/child{num}_child_growthmon')
             return any(
-                form.xpath(xpath) == '1'
+                form.get_data(xpath) == '1'
                 for form in self.filtered_forms(CHILDREN_FORMS, 3)
             )
 
@@ -434,7 +434,7 @@ class OPMCaseRow(object):
         """
         xpath = self.child_xpath('form/child_{num}/child{num}_child_growthmon')
         return any(
-            form.xpath(xpath) == '1'
+            form.get_data(xpath) == '1'
             for form in self.filtered_forms(CHILDREN_FORMS, 1)
         )
 
@@ -454,7 +454,7 @@ class OPMCaseRow(object):
 
             xpath = self.child_xpath('form/child_{num}/child{num}_child_growthmon')
             return any(
-                form.xpath(xpath) == '1'
+                form.get_data(xpath) == '1'
                 for form in self.filtered_forms(CHILDREN_FORMS, months_in_window)
             )
 
@@ -470,7 +470,7 @@ class OPMCaseRow(object):
 
                 def _from_forms():
                     return any(
-                        form.xpath('form/pregnancy_questions/ifa_receive') == '1'
+                        form.get_data('form/pregnancy_questions/ifa_receive') == '1'
                         for form in self.filtered_forms(BIRTH_PREP_XMLNS,
                                                         explicit_start=self.preg_first_eligible_datetime)
                     )
@@ -484,15 +484,23 @@ class OPMCaseRow(object):
 
             for form in self.filtered_forms(CHILDREN_FORMS, 3):
                 xpath = self.child_xpath('form/child_{num}/child{num}_child_orszntreat')
-                if form.xpath(xpath) == '0':
+                if form.get_data(xpath) == '0':
                     return False
             return True
 
     @property
+    def child_has_diarhea_in_this_month(self):
+        for form in self.filtered_forms(CHILDREN_FORMS, 1):
+            xpath = self.child_xpath('form/child_{num}/child{num}_suffer_diarrhea')
+            if form.get_data(xpath) == '1':
+                return True
+        return False
+
+    @property
     def child_with_diarhea_received_ors(self):
-        for form in self.filtered_forms(CHILDREN_FORMS):
+        for form in self.filtered_forms(CHILDREN_FORMS, 1):
             xpath = self.child_xpath('form/child_{num}/child{num}_child_orszntreat')
-            if form.xpath(xpath) and form.xpath(xpath) == '1':
+            if form.get_data(xpath) and form.get_data(xpath) == '1':
                 return True
         return False
 
@@ -500,7 +508,7 @@ class OPMCaseRow(object):
     def child_has_diarhea(self):
         for form in self.filtered_forms(CHILDREN_FORMS):
             xpath = self.child_xpath('form/child_{num}/child{num}_suffer_diarrhea')
-            if form.xpath(xpath) == '1':
+            if form.get_data(xpath) == '1':
                 return True
         return False
 
@@ -509,7 +517,7 @@ class OPMCaseRow(object):
         if self.child_age == 3 and self.block == 'atri':
             # This doesn't depend on a VHND - it should happen at the hospital
             def _test(form):
-                return form.xpath(self.child_xpath('form/child_{num}/child{num}_child_weight')) == '1'
+                return form.get_data(self.child_xpath('form/child_{num}/child{num}_child_weight')) == '1'
 
             return any(
                 _test(form)
@@ -523,7 +531,7 @@ class OPMCaseRow(object):
                 return True
 
             def _test(form):
-                return form.xpath(self.child_xpath('form/child_{num}/child{num}_child_register')) == '1'
+                return form.get_data(self.child_xpath('form/child_{num}/child{num}_child_register')) == '1'
             return any(
                 _test(form)
                 for form in self.filtered_forms(CFU1_XMLNS, 3)
@@ -536,7 +544,7 @@ class OPMCaseRow(object):
                 return True
 
             def _test(form):
-                return form.xpath(self.child_xpath('form/child_{num}/child{num}_child_measlesvacc')) == '1'
+                return form.get_data(self.child_xpath('form/child_{num}/child{num}_child_measlesvacc')) == '1'
 
             return any(
                 _test(form)
@@ -569,7 +577,7 @@ class OPMCaseRow(object):
         if self.child_age == 6 and self.block == 'atri':
             xpath = self.child_xpath("form/child_{num}/child{num}_child_excbreastfed")
             forms = self.filtered_forms(CHILDREN_FORMS)
-            return bool(forms) and all([form.xpath(xpath) == '1' for form in forms])
+            return bool(forms) and all([form.get_data(xpath) == '1' for form in forms])
 
     @property
     def weight_grade_normal(self):
@@ -671,10 +679,15 @@ class OPMCaseRow(object):
             # app supports up to three children only
             num_children = min(self.num_children, 3)
             if num_children > 1:
-                extra_child_objects = [
-                    self.__class__(self.case, self.report, child_index=num + 2, is_secondary=True)
-                    for num in range(num_children - 1)
-                ]
+                extra_child_objects = []
+                for num in range(num_children - 1):
+                    try:
+                        extra_child_objects.append(
+                            self.__class__(self.case, self.report,
+                                           child_index=num + 2, is_secondary=True)
+                        )
+                    except InvalidRow:
+                        pass
                 self.report.set_extra_row_objects(extra_child_objects)
 
     @property
@@ -846,8 +859,14 @@ class ConditionsMet(OPMCaseRow):
                                             "पोषण दिवस में उपस्थित नही", self.child_attended_vhnd)
             self.two = self.condition_image(C_WEIGHT_Y, C_WEIGHT_N, "बच्चे का वज़न लिया गया",
                                             "बच्चे का वज़न लिया गया", self.child_growth_calculated)
-            self.three = self.condition_image(ORSZNTREAT_Y, ORSZNTREAT_N, "दस्त होने पर ओ.आर.एस एवं जिंक लिया",
-                                              "दस्त होने पर ओ.आर.एस एवं जिंक नहीं लिया", self.child_received_ors)
+            if self.child_has_diarhea and self.child_received_ors:
+                self.three = self.img_elem % (ORSZNTREAT_Y, "दस्त होने पर ओ.आर.एस एवं जिंक लिया")
+            elif self.child_has_diarhea and not self.child_received_ors:
+                self.three = self.img_elem % (ORSZNTREAT_N, "दस्त होने पर ओ.आर.एस एवं जिंक नहीं लिया")
+            elif not self.child_has_diarhea:
+                self.three = self.img_elem % (ORSZNTREAT_Y, "बच्चे को दस्त नहीं हुआ")
+            else:
+                self.three = ""
             if self.child_condition_four is not None:
                 self.four = self.condition_image(self.child_image_four[0], self.child_image_four[1],
                                                  self.child_image_four[2], self.child_image_four[3],
@@ -973,6 +992,7 @@ class LongitudinalConditionsMet(ConditionsMet):
         ('eight', ugettext_lazy("Condition 8 /child weight monitored this month"), True, None),
         ('nine', ugettext_lazy("Condition 9 /ORS administered if child had diarrhea"), True, None),
         ('ten', ugettext_lazy("Condition 10/ Measles vaccine given before child turns 1"), True, None),
+        ('incidence_of_diarrhea', ugettext_lazy("Incidence Of Diarrhea"), True, None),
         ('birth_spacing_bonus', ugettext_lazy("Birth Spacing Bonus"), True, None),
         ('weight_this_month_1', ugettext_lazy("Weight This Month - Child 1"), True, None),
         ('weight_this_month_2', ugettext_lazy("Weight This Month - Child 2"), True, None),
@@ -1060,14 +1080,14 @@ class LongitudinalConditionsMet(ConditionsMet):
 
     def get_value_from_form(self, form_xmlns, path):
         return self.get_first_or_empty([
-            form.xpath(path)
+            form.get_data(path)
             for form in self.filtered_forms(form_xmlns)
         ])
 
     @property
     def dob_known(self):
         return any(
-            form.xpath('form/dob_known') == 1
+            form.get_data('form/dob_known') == 1
             for form in self.filtered_forms(PREG_REG_XMLNS)
         )
 
@@ -1095,7 +1115,7 @@ class LongitudinalConditionsMet(ConditionsMet):
 
         def _from_forms(filter_kwargs):
             return any(
-                form.xpath('form/pregnancy_questions/mother_weight') == '1'
+                form.get_data('form/pregnancy_questions/mother_weight') == '1'
                 for form in self.filtered_forms(BIRTH_PREP_XMLNS, **filter_kwargs)
             )
 
@@ -1109,3 +1129,7 @@ class LongitudinalConditionsMet(ConditionsMet):
                 return True
 
             return _from_case('weight_tri_2') or _from_forms({'months_before': 3})
+
+    @property
+    def incidence_of_diarrhea(self):
+        return "Yes" if self.child_has_diarhea else "No"

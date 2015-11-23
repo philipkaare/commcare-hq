@@ -2,13 +2,15 @@ import json
 import os
 import tempfile
 from StringIO import StringIO
+from corehq.apps.domain.views import BaseDomainView
+from corehq.apps.style.decorators import use_bootstrap3, use_knockout_js, \
+    use_select2, use_daterangepicker, use_jquery_ui, use_nvd3, use_datatables
 from dimagi.utils.modules import to_function
 from django.conf import settings
 from django.contrib import messages
 from django.core.urlresolvers import reverse
 from django.http import HttpResponse, Http404
-from django.utils.translation import ugettext_noop as _
-from django.views.generic.base import TemplateView
+from django.utils.translation import ugettext as _, ugettext_noop
 from braces.views import JSONResponseMixin
 from corehq.apps.reports.dispatcher import (
     cls_to_view_login_and_domain,
@@ -47,11 +49,36 @@ from no_exceptions.exceptions import Http403
 from corehq.apps.reports.datatables import DataTablesHeader
 
 
-class ConfigurableReport(JSONResponseMixin, TemplateView):
+class ConfigurableReport(JSONResponseMixin, BaseDomainView):
+    section_name = ugettext_noop("Reports")
     template_name = 'userreports/configurable_report.html'
     slug = "configurable"
     prefix = slug
     emailable = True
+
+    _domain = None
+
+    @property
+    def domain(self):
+        if self._domain is not None:
+            return self._domain
+        return super(ConfigurableReport, self).domain
+
+    @use_bootstrap3
+    @use_knockout_js
+    @use_select2
+    @use_daterangepicker
+    @use_jquery_ui
+    @use_datatables
+    @use_nvd3
+    def dispatch(self, request, *args, **kwargs):
+        original = super(ConfigurableReport, self).dispatch(request, *args, **kwargs)
+        return original
+
+    @property
+    def section_url(self):
+        # todo what should the parent section url be?
+        return "#"
 
     @property
     def is_static(self):
@@ -88,6 +115,10 @@ class ConfigurableReport(JSONResponseMixin, TemplateView):
 
     @property
     def title(self):
+        return self.spec.title
+
+    @property
+    def page_name(self):
         return self.spec.title
 
     @property
@@ -128,24 +159,34 @@ class ConfigurableReport(JSONResponseMixin, TemplateView):
     def filters(self):
         return self.spec.ui_filters
 
-    @cls_to_view_login_and_domain
-    def dispatch(self, request, domain, subreport_slug, **kwargs):
-        self.request = request
-        self.domain = domain
-        self.report_config_id = subreport_slug
-        self.lang = self.request.couch_user.language or default_language()
-        user = request.couch_user
-        if self.has_permissions(self.domain, user):
+    _report_config_id = None
+
+    @property
+    def report_config_id(self):
+        if self._report_config_id is not None:
+            return self._report_config_id
+        return self.kwargs['subreport_slug']
+
+    _lang = None
+
+    @property
+    def lang(self):
+        if self._lang is not None:
+            return self._lang
+        return self.request.couch_user.language or default_language()
+
+    def get(self, request, *args, **kwargs):
+        if self.has_permissions(self.domain, request.couch_user):
             self.get_spec_or_404()
             if kwargs.get('render_as') == 'email':
                 return self.email_response
             elif kwargs.get('render_as') == 'excel':
                 return self.excel_response
             elif request.is_ajax() or request.GET.get('format', None) == 'json':
-                return self.get_ajax(request)
+                return self.get_ajax(self.request)
             self.content_type = None
-            self.add_warnings(request)
-            return super(ConfigurableReport, self).dispatch(request, self.domain, **kwargs)
+            self.add_warnings(self.request)
+            return super(ConfigurableReport, self).get(request, *args, **kwargs)
         else:
             raise Http403()
 
@@ -156,9 +197,9 @@ class ConfigurableReport(JSONResponseMixin, TemplateView):
         for warning in self.data_source.column_warnings:
             messages.warning(request, warning)
 
-    def get_context_data(self, **kwargs):
+    @property
+    def page_context(self):
         context = {
-            'domain': self.domain,
             'report': self,
             'filter_context': self.filter_context,
             'url': self.url,
@@ -181,12 +222,6 @@ class ConfigurableReport(JSONResponseMixin, TemplateView):
         saved_report_config = get_document_or_404(ReportConfig, self.domain, saved_report_config_id) \
             if saved_report_config_id else None
 
-        datespan_filters = []
-        for f in self.datespan_filters:
-            copy = dict(f)
-            copy['display'] = localize(copy['display'], self.lang)
-            datespan_filters.append(copy)
-
         return {
             'report_configs': [
                 _get_context_for_saved_report(saved_report)
@@ -195,10 +230,7 @@ class ConfigurableReport(JSONResponseMixin, TemplateView):
                 )
             ],
             'default_config': _get_context_for_saved_report(saved_report_config),
-            'datespan_filters': [{
-                'display': _('Choose a date filter...'),
-                'slug': None,
-            }] + datespan_filters,
+            'datespan_filters': ReportConfig.datespan_filter_choices(self.datespan_filters, self.lang),
         }
 
     @property
@@ -222,7 +254,18 @@ class ConfigurableReport(JSONResponseMixin, TemplateView):
             if len(data_source.columns) > 50:
                 raise UserReportsError(_("This report has too many columns to be displayed"))
             data_source.set_filter_values(self.filter_values)
-            data_source.set_order_by([(o['field'], o['order']) for o in self.spec.sort_expression])
+
+            sort_column = request.GET.get('iSortCol_0')
+            sort_order = request.GET.get('sSortDir_0', 'ASC')
+            echo = int(request.GET.get('sEcho', 1))
+            if sort_column and echo != 1:
+                data_source.set_order_by(
+                    [(data_source.column_configs[int(sort_column)].column_id, sort_order.upper())]
+                )
+            else:
+                # Use defined sort expression initially
+                data_source.set_order_by([(o['field'], o['order']) for o in self.spec.sort_expression])
+
             total_records = data_source.get_total_records()
         except UserReportsError as e:
             if settings.DEBUG:
@@ -230,6 +273,8 @@ class ConfigurableReport(JSONResponseMixin, TemplateView):
             return self.render_json_response({
                 'error': e.message,
                 'aaData': [],
+                'iTotalRecords': 0,
+                'iTotalDisplayRecords': 0,
             })
         except TableNotFoundWarning:
             if self.spec.report_meta.created_by_builder:
@@ -293,8 +338,8 @@ class ConfigurableReport(JSONResponseMixin, TemplateView):
     @classmethod
     def get_report(cls, domain, slug, report_config_id):
         report = cls()
-        report.domain = domain
-        report.report_config_id = report_config_id
+        report._domain = domain
+        report._report_config_id = report_config_id
         if not report.has_viable_configuration():
             return None
         report.name = report.title
@@ -381,7 +426,7 @@ class CustomConfigurableReportDispatcher(ReportDispatcher):
             report_class = self._report_class(domain, report_config_id)
         except BadSpecError:
             raise Http404
-        return report_class().dispatch(request, domain, report_config_id, **kwargs)
+        return report_class.as_view()(request, domain=domain, subreport_slug=report_config_id, **kwargs)
 
     def get_report(self, domain, slug, config_id):
         try:

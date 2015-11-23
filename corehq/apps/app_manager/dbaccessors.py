@@ -1,7 +1,7 @@
+from django.conf import settings
 from corehq.apps.app_manager.util import get_correct_app_class
 from couchdbkit.exceptions import DocTypeError
 from couchdbkit.resource import ResourceNotFound
-from dimagi.utils.couch.database import get_db
 from django.http import Http404
 
 
@@ -22,10 +22,11 @@ def get_app(domain, app_id, wrap_cls=None, latest=False, target=None):
     (Application or RemoteApp).
 
     """
+    from .models import Application
 
     if latest:
         try:
-            original_app = get_db().get(app_id)
+            original_app = Application.get_db().get(app_id)
         except ResourceNotFound:
             raise Http404()
         if not domain:
@@ -52,7 +53,7 @@ def get_app(domain, app_id, wrap_cls=None, latest=False, target=None):
             startkey = ['^ReleasedApplications', domain, parent_app_id, {}]
             endkey = ['^ReleasedApplications', domain, parent_app_id, min_version]
 
-        latest_app = get_db().view(
+        latest_app = Application.get_db().view(
             couch_view,
             startkey=startkey,
             endkey=endkey,
@@ -68,7 +69,7 @@ def get_app(domain, app_id, wrap_cls=None, latest=False, target=None):
             app = original_app
     else:
         try:
-            app = get_db().get(app_id)
+            app = Application.get_db().get(app_id)
         except Exception:
             raise Http404()
     if domain and app['domain'] != domain:
@@ -121,3 +122,14 @@ def get_built_app_ids(domain):
     app_ids = [data.get('value', {}).get('copy_of') for data in result]
     app_ids = list(set(app_ids))
     return [app_id for app_id in app_ids if app_id]
+
+
+def get_exports_by_application(domain):
+    from .models import Application
+    return Application.get_db().view(
+        'exports_forms/by_xmlns',
+        startkey=['^Application', domain],
+        endkey=['^Application', domain, {}],
+        reduce=False,
+        stale=settings.COUCH_STALE_QUERY,
+    )

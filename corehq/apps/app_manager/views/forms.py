@@ -237,6 +237,8 @@ def edit_form_attr(request, domain, app_id, unique_form_id, attr):
             xform.set_name(name)
             save_xform(app, form, xform.render())
         resp['update'] = {'.variable-form_name': form.name[lang]}
+    if should_edit('comment'):
+        form.comment = request.POST['comment']
     if should_edit("xform"):
         try:
             # support FILES for upload and POST for ajax post from Vellum
@@ -471,7 +473,7 @@ def get_form_view_context_and_template(request, domain, form, langs, is_user_reg
         'allow_cloudcare': app.application_version == APP_V2 and isinstance(form, Form),
         'allow_form_copy': isinstance(form, Form),
         'allow_form_filtering': not isinstance(form, CareplanForm) and not form_has_schedule,
-        'allow_form_workflow': is_user_registration and not isinstance(form, CareplanForm),
+        'allow_form_workflow': not is_user_registration and not isinstance(form, CareplanForm),
         'allow_usercase': domain_has_privilege(request.domain, privileges.USER_CASE),
         'is_usercase_in_use': is_usercase_in_use(request.domain),
     }

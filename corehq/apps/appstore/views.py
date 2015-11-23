@@ -179,12 +179,6 @@ def es_snapshot_query(params, facets=None, terms=None, sort_by="snapshot_time"):
     return es_query(params, facets, terms, q)
 
 
-def appstore_default(request):
-    from corehq.apps.appstore.dispatcher import AppstoreDispatcher
-
-    return HttpResponseRedirect(reverse(AppstoreDispatcher.name(), args=['advanced']))
-
-
 @require_superuser
 def approve_app(request, domain):
     domain = Domain.get(domain)
@@ -268,6 +262,9 @@ def copy_snapshot(request, domain):
                     new_domain = dom.save_copy(new_domain_name,
                                                new_hr_name=form.cleaned_data['hr_name'],
                                                user=user)
+                    if new_domain.commtrack_enabled:
+                        new_domain.convert_to_commtrack()
+
                 except NameUnavailableException:
                     messages.error(request, _("A project by that name already exists"))
                     return project_info(request, domain)

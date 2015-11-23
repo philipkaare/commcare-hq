@@ -4,10 +4,11 @@ from django.db import transaction
 from django.utils.translation import ugettext as _
 from casexml.apps.case.const import CASE_ACTION_COMMTRACK
 from casexml.apps.case.exceptions import IllegalCaseId
-from casexml.apps.case.xform import is_device_report, CaseDbCache
+from casexml.apps.case.xform import is_device_report
 from casexml.apps.stock.models import StockTransaction, StockReport
 from corehq.apps.commtrack.parsing import unpack_commtrack
-from couchforms.util import is_deprecation
+from corehq.form_processor.casedb_base import AbstractCaseDbCache
+from corehq.form_processor.interfaces.processor import FormProcessorInterface
 from dimagi.utils.decorators.log_exception import log_exception
 from casexml.apps.case.models import CommCareCaseAction
 from casexml.apps.case.xml.parser import AbstractAction
@@ -169,12 +170,12 @@ def get_stock_actions(xform):
     case_ids = list(set(transaction_helper.case_id
                         for transaction_helper in transaction_helpers))
 
-    user_id = xform.form['meta']['userID']
-    submit_time = xform['received_on']
+    user_id = xform.metadata.userID
+    submit_time = xform.received_on
     case_action_intents = []
 
     for case_id in case_ids:
-        if is_deprecation(xform):
+        if xform.is_deprecated:
             case_action_intents.append(CaseActionIntent(
                 case_id=case_id, form_id=xform.orig_id, is_deprecation=True, action=None
             ))
@@ -183,7 +184,7 @@ def get_stock_actions(xform):
                 submit_time, user_id, xform, AbstractAction(CASE_ACTION_COMMTRACK)
             )
             case_action_intents.append(CaseActionIntent(
-                case_id=case_id, form_id=xform._id, is_deprecation=False, action=case_action
+                case_id=case_id, form_id=xform.form_id, is_deprecation=False, action=case_action
             ))
 
     return StockFormActions(stock_report_helpers, case_action_intents)
@@ -194,10 +195,12 @@ def process_stock(xforms, case_db=None):
     """
     process the commtrack xml constructs in an incoming submission
     """
-    case_db = case_db or CaseDbCache()
-    assert isinstance(case_db, CaseDbCache)
+    if not case_db:
+        case_db = FormProcessorInterface(xforms[0].domain).casedb_cache()
+    else:
+        assert isinstance(case_db, AbstractCaseDbCache)
 
-    sorted_forms = sorted(xforms, key=lambda f: 0 if is_deprecation(f) else 1)
+    sorted_forms = sorted(xforms, key=lambda f: 0 if f.is_deprecated else 1)
     stock_report_helpers = []
     case_action_intents = []
     for xform in sorted_forms:
@@ -234,11 +237,13 @@ def process_stock(xforms, case_db=None):
             # since consumption data could change server-side
             case_action.sync_log_id = ''
             case.actions.append(case_action)
+            if action_intent.form_id not in case.xform_ids:
+                case.xform_ids.append(action_intent.form_id)
 
         case_db.mark_changed(case)
 
     return StockProcessingResult(
-        xform=xform,
+        xform=sorted_forms[-1],
         relevant_cases=relevant_cases,
         stock_report_helpers=stock_report_helpers,
     )

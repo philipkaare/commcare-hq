@@ -1,6 +1,8 @@
 import datetime
 from django.test import TestCase
-from couchforms.dbaccessors import get_forms_by_type, clear_forms_in_domain, \
+
+from corehq.form_processor.test_utils import FormProcessorTestUtils
+from couchforms.dbaccessors import get_forms_by_type, \
     get_number_of_forms_by_type, get_number_of_forms_of_all_types, \
     get_form_ids_by_type, get_number_of_forms_all_domains_in_couch
 from couchforms.models import XFormInstance, XFormError
@@ -10,7 +12,7 @@ class TestDBAccessors(TestCase):
 
     @classmethod
     def setUpClass(cls):
-        from casexml.apps.case.tests import delete_all_xforms
+        from casexml.apps.case.tests.util import delete_all_xforms
         delete_all_xforms()
         cls.domain = 'evelyn'
         cls.now = datetime.datetime.utcnow()
@@ -27,7 +29,7 @@ class TestDBAccessors(TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        clear_forms_in_domain(cls.domain)
+        FormProcessorTestUtils.delete_all_xforms(cls.domain)
 
     def test_get_forms_by_type_xforminstance(self):
         forms = get_forms_by_type(self.domain, 'XFormInstance', limit=10)

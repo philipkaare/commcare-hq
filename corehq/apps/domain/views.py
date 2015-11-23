@@ -34,6 +34,8 @@ from corehq.apps.accounting.decorators import (
     requires_privilege_with_fallback,
 )
 from corehq.apps.hqwebapp.tasks import send_mail_async
+from corehq.apps.style.decorators import use_bootstrap3, use_jquery_ui, \
+    use_jquery_ui_multiselect, use_knockout_js
 from corehq.apps.accounting.exceptions import (
     NewSubscriptionError,
     PaymentRequestError,
@@ -64,10 +66,16 @@ from corehq.apps.accounting.models import (
     DefaultProductPlan, SoftwarePlanEdition, BillingAccount,
     BillingAccountType,
     Invoice, BillingRecord, InvoicePdf, PaymentMethodType,
-    PaymentMethod, EntryPoint, WireInvoice, SoftwarePlanVisibility, FeatureType
+    PaymentMethod, EntryPoint, WireInvoice, SoftwarePlanVisibility, FeatureType,
+    StripePaymentMethod,
 )
 from corehq.apps.accounting.usage import FeatureUsageCalculator
-from corehq.apps.accounting.user_text import get_feature_name, PricingTable, DESC_BY_EDITION
+from corehq.apps.accounting.user_text import (
+    get_feature_name,
+    PricingTable,
+    DESC_BY_EDITION,
+    get_feature_recurring_interval,
+)
 from corehq.apps.hqwebapp.models import ProjectSettingsTab
 from corehq.apps import receiverwrapper
 from corehq.apps.domain.calculations import CALCS, CALC_FNS, CALC_ORDER, dom_calc
@@ -83,7 +91,6 @@ from corehq.apps.domain.forms import (
 from corehq.apps.domain.models import Domain, LICENSES, TransferDomainRequest
 from corehq.apps.domain.utils import normalize_domain_name
 from corehq.apps.hqwebapp.views import BaseSectionPageView, BasePageView, CRUDPaginatedViewMixin
-from corehq.apps.orgs.models import Organization, OrgRequest, Team
 from corehq.apps.domain.forms import ProjectSettingsForm
 from dimagi.utils.decorators.memoized import memoized
 from dimagi.utils.web import get_ip, json_response, get_site_domain
@@ -131,11 +138,17 @@ def select(request, domain_select_template='domain/select.html', do_not_redirect
     else:
         domain = Domain.get_by_name(last_visited_domain)
         if domain and domain.is_active:
-            try:
-                from corehq.apps.dashboard.views import dashboard_default
-                return dashboard_default(request, last_visited_domain)
-            except Http404:
-                pass
+            # mirrors logic in login_and_domain_required
+            if (
+                request.couch_user.is_member_of(domain) or domain.is_public
+                or (request.user.is_superuser and not domain.restrict_superusers)
+                or domain.is_snapshot
+            ):
+                try:
+                    from corehq.apps.dashboard.views import dashboard_default
+                    return dashboard_default(request, last_visited_domain)
+                except Http404:
+                    pass
 
         del request.session['last_visited_domain']
         return render(request, domain_select_template, additional_context)
@@ -187,7 +200,7 @@ class LoginAndDomainMixin(object):
 
 class SubscriptionUpgradeRequiredView(LoginAndDomainMixin, BasePageView,
                                       DomainViewMixin):
-    page_title = ugettext_noop("Upgrade Required")
+    page_title = ugettext_lazy("Upgrade Required")
     template_name = "domain/insufficient_privilege_notification.html"
 
     @property
@@ -257,7 +270,7 @@ class BaseDomainView(LoginAndDomainMixin, BaseSectionPageView, DomainViewMixin):
 
 
 class BaseProjectSettingsView(BaseDomainView):
-    section_name = ugettext_noop("Project Settings")
+    section_name = ugettext_lazy("Project Settings")
     template_name = "settings/base_template.html"
 
     @property
@@ -330,7 +343,12 @@ class BaseEditProjectInfoView(BaseAdminProjectSettingsView):
 class EditBasicProjectInfoView(BaseEditProjectInfoView):
     template_name = 'domain/admin/info_basic.html'
     urlname = 'domain_basic_info'
-    page_title = ugettext_noop("Basic")
+    page_title = ugettext_lazy("Basic")
+
+    @method_decorator(domain_admin_required)
+    @use_bootstrap3
+    def dispatch(self, request, *args, **kwargs):
+        return super(BaseProjectSettingsView, self).dispatch(request, *args, **kwargs)
 
     @property
     def can_user_see_meta(self):
@@ -348,7 +366,8 @@ class EditBasicProjectInfoView(BaseEditProjectInfoView):
             'default_timezone': self.domain_object.default_timezone,
             'case_sharing': json.dumps(self.domain_object.case_sharing),
             'call_center_enabled': self.domain_object.call_center_config.enabled,
-            'call_center_case_owner': self.domain_object.call_center_config.case_owner_id,
+            'call_center_type': self.initial_call_center_type,
+            'call_center_case_owner': self.initial_call_center_case_owner,
             'call_center_case_type': self.domain_object.call_center_config.case_type,
             'commtrack_enabled': self.domain_object.commtrack_enabled,
         }
@@ -367,7 +386,6 @@ class EditBasicProjectInfoView(BaseEditProjectInfoView):
                 domain=self.domain_object.name,
                 can_use_custom_logo=self.can_use_custom_logo
             )
-
         if self.can_user_see_meta:
             initial.update({
                 'is_test': self.domain_object.is_test,
@@ -387,6 +405,23 @@ class EditBasicProjectInfoView(BaseEditProjectInfoView):
         )
 
     @property
+    @memoized
+    def initial_call_center_case_owner(self):
+        config = self.domain_object.call_center_config
+        if config.use_user_location_as_owner:
+            if config.user_location_ancestor_level == 1:
+                return DomainGlobalSettingsForm.USE_PARENT_LOCATION_CHOICE
+            return DomainGlobalSettingsForm.USE_LOCATION_CHOICE
+        return self.domain_object.call_center_config.case_owner_id
+
+    @property
+    @memoized
+    def initial_call_center_type(self):
+        if self.domain_object.call_center_config.use_fixtures:
+            return DomainGlobalSettingsForm.CASES_AND_FIXTURES_CHOICE
+        return DomainGlobalSettingsForm.CASES_ONLY_CHOICE
+
+    @property
     def page_context(self):
         return {
             'basic_info_form': self.basic_info_form,
@@ -404,7 +439,13 @@ class EditBasicProjectInfoView(BaseEditProjectInfoView):
 class EditMyProjectSettingsView(BaseProjectSettingsView):
     template_name = 'domain/admin/my_project_settings.html'
     urlname = 'my_project_settings'
-    page_title = ugettext_noop("My Timezone")
+    page_title = ugettext_lazy("My Timezone")
+
+    @method_decorator(login_and_domain_required)
+    @use_bootstrap3
+    @use_knockout_js
+    def dispatch(self, *args, **kwargs):
+        return super(LoginAndDomainMixin, self).dispatch(*args, **kwargs)
 
     @property
     @memoized
@@ -449,7 +490,7 @@ class EditMyProjectSettingsView(BaseProjectSettingsView):
 class EditDhis2SettingsView(BaseProjectSettingsView):
     template_name = 'domain/admin/dhis2_settings.html'
     urlname = 'dhis2_settings'
-    page_title = ugettext_noop("DHIS2 API settings")
+    page_title = ugettext_lazy("DHIS2 API settings")
 
     @property
     @memoized
@@ -505,7 +546,6 @@ def test_repeater(request, domain):
                     create=True,
                     case_type='test',
                     case_name='test case',
-                    version=V2,
                 ).as_string()
             else:
                 return "<?xml version='1.0' ?><data id='test'><TestString>Test post from CommCareHQ on %s</TestString></data>" % \
@@ -567,7 +607,7 @@ class DomainAccountingSettings(BaseAdminProjectSettingsView):
 class DomainSubscriptionView(DomainAccountingSettings):
     urlname = 'domain_subscription_view'
     template_name = 'domain/current_subscription.html'
-    page_title = ugettext_noop("Current Subscription")
+    page_title = ugettext_lazy("Current Subscription")
 
     @property
     def can_purchase_credits(self):
@@ -691,6 +731,7 @@ class DomainSubscriptionView(DomainAccountingSettings):
                 ),
                 'credit': self._fmt_credit(),
                 'type': feature_rate.feature.feature_type,
+                'recurring_interval': get_feature_recurring_interval(feature_rate.feature.feature_type),
             }
 
             credit_lines = None
@@ -726,7 +767,7 @@ class DomainSubscriptionView(DomainAccountingSettings):
 class EditExistingBillingAccountView(DomainAccountingSettings, AsyncHandlerMixin):
     template_name = 'domain/update_billing_contact_info.html'
     urlname = 'domain_update_billing_info'
-    page_title = ugettext_noop("Billing Contact Information")
+    page_title = ugettext_lazy("Billing Information")
     async_handlers = [
         Select2BillingInfoHandler,
     ]
@@ -749,7 +790,18 @@ class EditExistingBillingAccountView(DomainAccountingSettings, AsyncHandlerMixin
     def page_context(self):
         return {
             'billing_account_info_form': self.billing_info_form,
+            'cards': self._get_cards(),
+            'stripe_public_key': settings.STRIPE_PUBLIC_KEY,
+            'card_base_url': reverse(CardsView.url_name, args=[self.domain]),
         }
+
+    def _get_cards(self):
+        user = self.request.user.username
+        payment_method, new_payment_method = StripePaymentMethod.objects.get_or_create(
+            web_user=user,
+            method_type=PaymentMethodType.STRIPE,
+        )
+        return payment_method.all_cards_serialized(self.account)
 
     def post(self, request, *args, **kwargs):
         if self.async_response is not None:
@@ -772,11 +824,11 @@ class EditExistingBillingAccountView(DomainAccountingSettings, AsyncHandlerMixin
 class DomainBillingStatementsView(DomainAccountingSettings, CRUDPaginatedViewMixin):
     template_name = 'domain/billing_statements.html'
     urlname = 'domain_billing_statements'
-    page_title = ugettext_noop("Billing Statements")
+    page_title = ugettext_lazy("Billing Statements")
 
-    limit_text = ugettext_noop("statements per page")
-    empty_notification = ugettext_noop("No Billing Statements match the current criteria.")
-    loading_message = ugettext_noop("Loading statements...")
+    limit_text = ugettext_lazy("statements per page")
+    empty_notification = ugettext_lazy("No Billing Statements match the current criteria.")
+    loading_message = ugettext_lazy("Loading statements...")
 
     @property
     def parameters(self):
@@ -946,7 +998,7 @@ class BaseStripePaymentView(DomainAccountingSettings):
             )
 
     def get_or_create_payment_method(self):
-        return PaymentMethod.objects.get_or_create(
+        return StripePaymentMethod.objects.get_or_create(
             web_user=self.domain_admin,
             method_type=PaymentMethodType.STRIPE,
         )[0]
@@ -1158,7 +1210,7 @@ class BillingStatementPdfView(View):
 class InternalSubscriptionManagementView(BaseAdminProjectSettingsView):
     template_name = 'domain/internal_subscription_management.html'
     urlname = 'internal_subscription_mgmt'
-    page_title = ugettext_noop("Dimagi Internal Subscription Management")
+    page_title = ugettext_lazy("Dimagi Internal Subscription Management")
     form_classes = INTERNAL_SUBSCRIPTION_MANAGEMENT_FORMS
 
     @method_decorator(require_superuser)
@@ -1228,10 +1280,10 @@ class InternalSubscriptionManagementView(BaseAdminProjectSettingsView):
 class SelectPlanView(DomainAccountingSettings):
     template_name = 'domain/select_plan.html'
     urlname = 'domain_select_plan'
-    page_title = ugettext_noop("Change Plan")
-    step_title = ugettext_noop("Select Plan")
+    page_title = ugettext_lazy("Change Plan")
+    step_title = ugettext_lazy("Select Plan")
     edition = None
-    lead_text = ugettext_noop("Please select a plan below that fits your organization's needs.")
+    lead_text = ugettext_lazy("Please select a plan below that fits your organization's needs.")
 
     @property
     def edition_name(self):
@@ -1290,7 +1342,12 @@ class SelectPlanView(DomainAccountingSettings):
 class EditPrivacySecurityView(BaseAdminProjectSettingsView):
     template_name = "domain/admin/project_privacy.html"
     urlname = "privacy_info"
-    page_title = ugettext_noop("Privacy and Security")
+    page_title = ugettext_lazy("Privacy and Security")
+
+    @method_decorator(domain_admin_required)
+    @use_bootstrap3
+    def dispatch(self, request, *args, **kwargs):
+        return super(BaseProjectSettingsView, self).dispatch(request, *args, **kwargs)
 
     @property
     @memoized
@@ -1320,7 +1377,7 @@ class EditPrivacySecurityView(BaseAdminProjectSettingsView):
 class SelectedEnterprisePlanView(SelectPlanView):
     template_name = 'domain/selected_enterprise_plan.html'
     urlname = 'enterprise_request_quote'
-    step_title = ugettext_noop("Contact Dimagi")
+    step_title = ugettext_lazy("Contact Dimagi")
     edition = SoftwarePlanEdition.ENTERPRISE
 
     @property
@@ -1362,7 +1419,7 @@ class SelectedEnterprisePlanView(SelectPlanView):
 class ConfirmSelectedPlanView(SelectPlanView):
     template_name = 'domain/confirm_plan.html'
     urlname = 'confirm_selected_plan'
-    step_title = ugettext_noop("Confirm Plan")
+    step_title = ugettext_lazy("Confirm Plan")
 
     @property
     def steps(self):
@@ -1428,7 +1485,7 @@ class ConfirmSelectedPlanView(SelectPlanView):
 class ConfirmBillingAccountInfoView(ConfirmSelectedPlanView, AsyncHandlerMixin):
     template_name = 'domain/confirm_billing_info.html'
     urlname = 'confirm_billing_account_info'
-    step_title = ugettext_noop("Confirm Billing Information")
+    step_title = ugettext_lazy("Confirm Billing Information")
     is_new = False
     async_handlers = [
         Select2BillingInfoHandler,
@@ -1455,6 +1512,15 @@ class ConfirmBillingAccountInfoView(ConfirmSelectedPlanView, AsyncHandlerMixin):
             entry_point=EntryPoint.SELF_STARTED,
         )
         return account
+
+    @property
+    def payment_method(self):
+        user = self.request.user.username
+        payment_method, __ = StripePaymentMethod.objects.get_or_create(
+            web_user=user,
+            method_type=PaymentMethodType.STRIPE,
+        )
+        return payment_method
 
     @property
     @memoized
@@ -1487,6 +1553,8 @@ class ConfirmBillingAccountInfoView(ConfirmSelectedPlanView, AsyncHandlerMixin):
     def page_context(self):
         return {
             'billing_account_info_form': self.billing_account_info_form,
+            'stripe_public_key': settings.STRIPE_PUBLIC_KEY,
+            'cards': self.payment_method.all_cards_serialized(self.account)
         }
 
     def post(self, request, *args, **kwargs):
@@ -1525,12 +1593,12 @@ class SubscriptionMixin(object):
 
 class SubscriptionRenewalView(SelectPlanView, SubscriptionMixin):
     urlname = "domain_subscription_renewal"
-    page_title = ugettext_noop("Renew Plan")
-    step_title = ugettext_noop("Renew or Change Plan")
+    page_title = ugettext_lazy("Renew Plan")
+    step_title = ugettext_lazy("Renew or Change Plan")
 
     @property
     def lead_text(self):
-        return ugettext_noop("Based on your current usage we recommend you use the <strong>{plan}</strong> plan"
+        return ugettext_lazy("Based on your current usage we recommend you use the <strong>{plan}</strong> plan"
                              .format(plan=self.current_subscription.plan_version.plan.edition))
 
     @property
@@ -1558,7 +1626,7 @@ class SubscriptionRenewalView(SelectPlanView, SubscriptionMixin):
 class ConfirmSubscriptionRenewalView(DomainAccountingSettings, AsyncHandlerMixin, SubscriptionMixin):
     template_name = 'domain/confirm_subscription_renewal.html'
     urlname = 'domain_subscription_renewal_confirmation'
-    page_title = ugettext_noop("Renew Plan")
+    page_title = ugettext_lazy("Renew Plan")
     async_handlers = [
         Select2BillingInfoHandler,
     ]
@@ -1627,7 +1695,12 @@ class ConfirmSubscriptionRenewalView(DomainAccountingSettings, AsyncHandlerMixin
 class ExchangeSnapshotsView(BaseAdminProjectSettingsView):
     template_name = 'domain/snapshot_settings.html'
     urlname = 'domain_snapshot_settings'
-    page_title = ugettext_noop("CommCare Exchange")
+    page_title = ugettext_lazy("CommCare Exchange")
+
+    @method_decorator(domain_admin_required)
+    @use_bootstrap3
+    def dispatch(self, request, *args, **kwargs):
+        return super(BaseProjectSettingsView, self).dispatch(request, *args, **kwargs)
 
     @property
     def page_context(self):
@@ -1641,8 +1714,14 @@ class ExchangeSnapshotsView(BaseAdminProjectSettingsView):
 class CreateNewExchangeSnapshotView(BaseAdminProjectSettingsView):
     template_name = 'domain/create_snapshot.html'
     urlname = 'domain_create_snapshot'
-    page_title = ugettext_noop("Publish New Version")
+    page_title = ugettext_lazy("Publish New Version")
     strict_domain_fetching = True
+
+    @method_decorator(domain_admin_required)
+    @use_bootstrap3
+    @use_jquery_ui
+    def dispatch(self, request, *args, **kwargs):
+        return super(BaseProjectSettingsView, self).dispatch(request, *args, **kwargs)
 
     @property
     def parent_pages(self):
@@ -1674,8 +1753,7 @@ class CreateNewExchangeSnapshotView(BaseAdminProjectSettingsView):
 
     @property
     def can_publish_as_org(self):
-        return (self.domain_object.get_organization()
-                and self.request.couch_user.is_org_admin(self.domain_object.get_organization().name))
+        return False
 
     @property
     @memoized
@@ -1694,7 +1772,8 @@ class CreateNewExchangeSnapshotView(BaseAdminProjectSettingsView):
         if self.published_snapshot:
             for app in self.published_snapshot.full_applications():
                 base_app_id = app.copy_of if self.domain_object == self.published_snapshot else app.copied_from.copy_of
-                published_apps[base_app_id] = app
+                if base_app_id:
+                    published_apps[base_app_id] = app
         return published_apps
 
     @property
@@ -1815,9 +1894,10 @@ class CreateNewExchangeSnapshotView(BaseAdminProjectSettingsView):
 
                     m_file.save()
 
-            ignore = ['UserRole']
             if not request.POST.get('share_reminders', False):
-                ignore.append('CaseReminderHandler')
+                share_reminders = False
+            else:
+                share_reminders = True
 
             copy_by_id = set()
             for k in request.POST.keys():
@@ -1825,8 +1905,8 @@ class CreateNewExchangeSnapshotView(BaseAdminProjectSettingsView):
                     copy_by_id.add(k[:-len("-publish")])
 
             old = self.domain_object.published_snapshot()
-            new_domain = self.domain_object.save_snapshot(ignore=ignore,
-                                                          copy_by_id=copy_by_id)
+            new_domain = self.domain_object.save_snapshot(
+                share_reminders=share_reminders, copy_by_id=copy_by_id)
             new_domain.license = new_license
             new_domain.description = request.POST['description']
             new_domain.short_description = request.POST['short_description']
@@ -1923,8 +2003,14 @@ class CreateNewExchangeSnapshotView(BaseAdminProjectSettingsView):
 
 class ManageProjectMediaView(BaseAdminProjectSettingsView):
     urlname = 'domain_manage_multimedia'
-    page_title = ugettext_noop("Multimedia Sharing")
+    page_title = ugettext_lazy("Multimedia Sharing")
     template_name = 'domain/admin/media_manager.html'
+
+    @method_decorator(domain_admin_required)
+    @use_bootstrap3
+    @use_knockout_js
+    def dispatch(self, request, *args, **kwargs):
+        return super(BaseProjectSettingsView, self).dispatch(request, *args, **kwargs)
 
     @property
     def project_media_data(self):
@@ -1978,8 +2064,13 @@ class RepeaterMixin(object):
 
 class DomainForwardingOptionsView(BaseAdminProjectSettingsView, RepeaterMixin):
     urlname = 'domain_forwarding'
-    page_title = ugettext_noop("Data Forwarding")
+    page_title = ugettext_lazy("Data Forwarding")
     template_name = 'domain/admin/domain_forwarding.html'
+
+    @method_decorator(domain_admin_required)
+    @use_bootstrap3
+    def dispatch(self, request, *args, **kwargs):
+        return super(BaseProjectSettingsView, self).dispatch(request, *args, **kwargs)
 
     @property
     def repeaters(self):
@@ -1999,9 +2090,14 @@ class DomainForwardingOptionsView(BaseAdminProjectSettingsView, RepeaterMixin):
 
 class AddRepeaterView(BaseAdminProjectSettingsView, RepeaterMixin):
     urlname = 'add_repeater'
-    page_title = ugettext_noop("Forward Data")
+    page_title = ugettext_lazy("Forward Data")
     template_name = 'domain/admin/add_form_repeater.html'
     repeater_form_class = GenericRepeaterForm
+
+    @method_decorator(domain_admin_required)
+    @use_bootstrap3
+    def dispatch(self, request, *args, **kwargs):
+        return super(BaseProjectSettingsView, self).dispatch(request, *args, **kwargs)
 
     @property
     def page_url(self):
@@ -2063,6 +2159,7 @@ class AddRepeaterView(BaseAdminProjectSettingsView, RepeaterMixin):
         return repeater
 
     def post(self, request, *args, **kwargs):
+        print self.add_repeater_form.errors
         if self.add_repeater_form.is_valid():
             repeater = self.make_repeater()
             repeater.save()
@@ -2084,40 +2181,6 @@ class AddFormRepeaterView(AddRepeaterView):
         repeater.exclude_device_reports = self.add_repeater_form.cleaned_data['exclude_device_reports']
         repeater.include_app_id_param = self.add_repeater_form.cleaned_data['include_app_id_param']
         return repeater
-
-
-class OrgSettingsView(BaseAdminProjectSettingsView):
-    template_name = 'domain/orgs_settings.html'
-    urlname = 'domain_org_settings'
-    page_title = ugettext_noop("Organization")
-
-    @method_decorator(requires_privilege_with_fallback(privileges.CROSS_PROJECT_REPORTS))
-    def dispatch(self, request, *args, **kwargs):
-        return super(OrgSettingsView, self).dispatch(request, *args, **kwargs)
-
-    @property
-    def page_context(self):
-        domain = self.domain_object
-        org_users = []
-        teams = Team.get_by_domain(domain.name)
-        for team in teams:
-            for user in team.get_members():
-                user.team_id = team.get_id
-                user.team = team.name
-                org_users.append(user)
-
-        for user in org_users:
-            user.current_domain = domain.name
-
-        all_orgs = Organization.get_all()
-
-        return {
-            "project": domain,
-            'domain': domain.name,
-            "organization": Organization.get_by_name(getattr(domain, "organization", None)),
-            "org_users": org_users,
-            "all_orgs": all_orgs,
-        }
 
 
 class BaseInternalDomainSettingsView(BaseProjectSettingsView):
@@ -2143,9 +2206,17 @@ class BaseInternalDomainSettingsView(BaseProjectSettingsView):
 
 class EditInternalDomainInfoView(BaseInternalDomainSettingsView):
     urlname = 'domain_internal_settings'
-    page_title = ugettext_noop("Project Information")
+    page_title = ugettext_lazy("Project Information")
     template_name = 'domain/internal_settings.html'
     strict_domain_fetching = True
+
+    @method_decorator(login_and_domain_required)
+    @method_decorator(require_superuser)
+    @use_bootstrap3
+    @use_jquery_ui
+    @use_jquery_ui_multiselect
+    def dispatch(self, request, *args, **kwargs):
+        return super(BaseInternalDomainSettingsView, self).dispatch(request, *args, **kwargs)
 
     @property
     def autocomplete_fields(self):
@@ -2235,8 +2306,14 @@ class EditInternalDomainInfoView(BaseInternalDomainSettingsView):
 
 class EditInternalCalculationsView(BaseInternalDomainSettingsView):
     urlname = 'domain_internal_calculations'
-    page_title = ugettext_noop("Calculated Properties")
+    page_title = ugettext_lazy("Calculated Properties")
     template_name = 'domain/internal_calculations.html'
+
+    @method_decorator(login_and_domain_required)
+    @method_decorator(require_superuser)
+    @use_bootstrap3
+    def dispatch(self, request, *args, **kwargs):
+        return super(BaseInternalDomainSettingsView, self).dispatch(request, *args, **kwargs)
 
     @property
     def page_context(self):
@@ -2319,7 +2396,7 @@ def set_published_snapshot(request, domain, snapshot_name=''):
 
 
 class ProBonoMixin():
-    page_title = ugettext_noop("Pro-Bono Application")
+    page_title = ugettext_lazy("Pro-Bono Application")
     is_submitted = False
 
     url_name = None
@@ -2388,8 +2465,13 @@ class ProBonoView(ProBonoMixin, DomainAccountingSettings):
 
 class FeaturePreviewsView(BaseAdminProjectSettingsView):
     urlname = 'feature_previews'
-    page_title = ugettext_noop("Feature Previews")
+    page_title = ugettext_lazy("Feature Previews")
     template_name = 'domain/admin/feature_previews.html'
+
+    @method_decorator(domain_admin_required)
+    @use_bootstrap3
+    def dispatch(self, request, *args, **kwargs):
+        return super(BaseProjectSettingsView, self).dispatch(request, *args, **kwargs)
 
     @memoized
     def features(self):
@@ -2431,9 +2513,10 @@ class FeaturePreviewsView(BaseAdminProjectSettingsView):
 
 class FeatureFlagsView(BaseAdminProjectSettingsView):
     urlname = 'domain_feature_flags'
-    page_title = ugettext_noop("Feature Flags")
+    page_title = ugettext_lazy("Feature Flags")
     template_name = 'domain/admin/feature_flags.html'
 
+    @use_bootstrap3
     @method_decorator(require_superuser)
     def dispatch(self, request, *args, **kwargs):
         return super(FeatureFlagsView, self).dispatch(request, *args, **kwargs)
@@ -2457,7 +2540,7 @@ class FeatureFlagsView(BaseAdminProjectSettingsView):
 
 class TransferDomainView(BaseAdminProjectSettingsView):
     urlname = 'transfer_domain_view'
-    page_title = ugettext_noop("Transfer Project")
+    page_title = ugettext_lazy("Transfer Project")
     template_name = 'domain/admin/transfer_domain.html'
 
     @property
@@ -2599,7 +2682,7 @@ from corehq.apps.smsbillables.async_handlers import PublicSMSRatesAsyncHandler
 
 class PublicSMSRatesView(BasePageView, AsyncHandlerMixin):
     urlname = 'public_sms_rates_view'
-    page_title = ugettext_noop("SMS Rate Calculator")
+    page_title = ugettext_lazy("SMS Rate Calculator")
     template_name = 'domain/admin/global_sms_rates.html'
     async_handlers = [PublicSMSRatesAsyncHandler]
 
@@ -2619,7 +2702,7 @@ class PublicSMSRatesView(BasePageView, AsyncHandlerMixin):
 
 class SMSRatesView(BaseAdminProjectSettingsView, AsyncHandlerMixin):
     urlname = 'domain_sms_rates_view'
-    page_title = ugettext_noop("SMS Rate Calculator")
+    page_title = ugettext_lazy("SMS Rate Calculator")
     template_name = 'domain/admin/sms_rates.html'
     async_handlers = [
         SMSRatesAsyncHandler,
@@ -2645,43 +2728,72 @@ class SMSRatesView(BaseAdminProjectSettingsView, AsyncHandlerMixin):
         return self.get(request, *args, **kwargs)
 
 
-@require_POST
-@domain_admin_required
-def org_request(request, domain):
-    org_name = request.POST.get("org_name", None)
-    org = Organization.get_by_name(org_name)
-    if org:
-        org_request = OrgRequest.get_requests(org_name, domain=domain, user_id=request.couch_user.get_id)
-        if not org_request:
-            org_request = OrgRequest(organization=org_name, domain=domain,
-                requested_by=request.couch_user.get_id, requested_on=datetime.datetime.utcnow())
-            org_request.save()
-            _send_request_notification_email(request, org, domain)
-            messages.success(request,
-                "Your request was submitted. The admin of organization %s can now choose to manage the project %s" %
-                (org_name, domain))
-        else:
-            messages.error(request, "You've already submitted a request to this organization")
-    else:
-        messages.error(request, "The organization '%s' does not exist" % org_name)
-    return HttpResponseRedirect(reverse('domain_org_settings', args=[domain]))
+class BaseCardView(DomainAccountingSettings):
+
+    @property
+    def payment_method(self):
+        payment_method, __ = StripePaymentMethod.objects.get_or_create(
+            web_user=self.request.user.username,
+            method_type=PaymentMethodType.STRIPE,
+        )
+        return payment_method
+
+    def _generic_error(self):
+        error = ("Something went wrong while processing your request. "
+                 "We're working quickly to resolve the issue. "
+                 "Please try again in a few hours.")
+        return json_response({'error': error}, status_code=500)
+
+    def _stripe_error(self, e):
+        body = e.json_body
+        err = body['error']
+        return json_response({'error': err['message'],
+                              'cards': self.payment_method.all_cards_serialized(self.account)},
+                             status_code=502)
 
 
-def _send_request_notification_email(request, org, dom):
-    params = {"org": org, "dom": dom, "requestee": request.couch_user,
-              "url_base": get_site_domain()}
-    text_content = render_to_string(
-        "domain/email/org_request_notification.txt", params)
-    html_content = render_to_string(
-        "domain/email/org_request_notification.html", params)
-    recipients = [member.email for member in org.get_members()
-                  if member.is_org_admin(org.name)]
-    subject = "New request to add a project to your organization! -- CommcareHQ"
-    try:
-        for recipient in recipients:
-            send_html_email_async.delay(subject, recipient, html_content,
-                                        text_content=text_content,
-                                        email_from=settings.DEFAULT_FROM_EMAIL)
-    except Exception:
-        logging.warning("Can't send notification email, "
-                        "but the message was:\n%s" % text_content)
+class CardView(BaseCardView):
+    """View for dealing with a single Credit Card"""
+    url_name = "card_view"
+
+    def post(self, request, domain, card_token):
+        try:
+            card = self.payment_method.get_card(card_token)
+            if request.POST.get("is_autopay") == 'true':
+                self.payment_method.set_autopay(card, self.account, domain)
+            elif request.POST.get("is_autopay") == 'false':
+                self.payment_method.unset_autopay(card, self.account)
+        except self.payment_method.STRIPE_GENERIC_ERROR as e:
+            return self._stripe_error(e)
+        except Exception as e:
+            return self._generic_error()
+
+        return json_response({'cards': self.payment_method.all_cards_serialized(self.account)})
+
+    def delete(self, request, domain, card_token):
+        try:
+            self.payment_method.remove_card(card_token)
+        except self.payment_method.STRIPE_GENERIC_ERROR as e:
+            return self._stripe_error(e)
+
+        return json_response({'cards': self.payment_method.all_cards_serialized(self.account)})
+
+
+class CardsView(BaseCardView):
+    """View for dealing Credit Cards"""
+    url_name = "cards_view"
+
+    def get(self, request, domain):
+        return json_response({'cards': self.payment_method.all_cards_serialized(self.account)})
+
+    def post(self, request, domain):
+        stripe_token = request.POST.get('token')
+        autopay = request.POST.get('autopay') == 'true'
+        try:
+            self.payment_method.create_card(stripe_token, self.account, domain, autopay)
+        except self.payment_method.STRIPE_GENERIC_ERROR as e:
+            return self._stripe_error(e)
+        except Exception as e:
+            return self._generic_error()
+
+        return json_response({'cards': self.payment_method.all_cards_serialized(self.account)})

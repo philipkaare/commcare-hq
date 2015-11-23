@@ -1,5 +1,5 @@
 from django.test import TestCase
-from casexml.apps.case.cleanup import rebuild_case
+from casexml.apps.case.cleanup import rebuild_case_from_forms
 from casexml.apps.case.models import CommCareCase
 from casexml.apps.stock.models import StockTransaction
 from corehq.apps.commtrack.helpers import make_product
@@ -7,7 +7,7 @@ from corehq.apps.commtrack.models import StockState
 from corehq.apps.commtrack.processing import rebuild_stock_state
 from corehq.apps.commtrack.tests.util import get_single_balance_block
 from corehq.apps.hqcase.utils import submit_case_blocks
-
+from corehq.form_processor.models import RebuildWithReason
 
 LEDGER_BLOCKS_SIMPLE = """
 <transfer xmlns="http://commcarehq.org/ledger/v1" dest="{case_id}" date="2000-01-02" section-id="stock">
@@ -93,7 +93,7 @@ class RebuildStockStateTest(TestCase):
         """
         form_id = self._submit_ledgers(LEDGER_BLOCKS_SIMPLE)
         case_id = self.case.case_id
-        rebuild_case(case_id)
+        rebuild_case_from_forms(self.domain, case_id, RebuildWithReason(reason='test'))
         case = CommCareCase.get(case_id)
         self.assertEqual(case.xform_ids, [form_id])
         self.assertEqual(case.actions[0].xform_id, form_id)
@@ -110,6 +110,7 @@ class RebuildStockStateTest(TestCase):
         self.assertEqual(all_txns.count(), 1)
         case = CommCareCase.get(id=self.case.case_id)
         self.assertEqual(1, len(case.actions))
+        self.assertEqual([form_id], case.xform_ids)
 
         # change the value to 50
         edit_quantity = 50
@@ -124,3 +125,4 @@ class RebuildStockStateTest(TestCase):
         self.assertEqual(stock_state.stock_on_hand, edit_quantity)
         self.assertEqual(latest_txn.stock_on_hand, edit_quantity)
         self.assertEqual(all_txns.count(), 1)
+        self.assertEqual([form_id], case.xform_ids)

@@ -130,7 +130,7 @@ class SummaryReportingRates(ReportingRatesData):
 
     @property
     @memoized
-    def get_locations(self):
+    def locations(self):
         return SQLLocation.objects.filter(
             domain=self.domain,
             parent__location_id=self.config['location_id'],
@@ -140,9 +140,9 @@ class SummaryReportingRates(ReportingRatesData):
 
     @property
     def headers(self):
-        if self.location_id:
+        if self.location_id and self.locations:
             return DataTablesHeader(
-                DataTablesColumn(_(self.get_locations[0].location_type.name.title())),
+                DataTablesColumn(_(self.locations[0].location_type.name.title())),
                 DataTablesColumn(_('# Sites')),
                 DataTablesColumn(_('# Reporting')),
                 DataTablesColumn(_('Reporting Rate')),
@@ -154,7 +154,7 @@ class SummaryReportingRates(ReportingRatesData):
     @property
     def rows(self):
         rows = []
-        if self.location_id:
+        if self.location_id and self.locations:
             for location_name, values in self.config['summary_reporting_rates'].iteritems():
                 url = make_url(
                     ReportingRatesReport,
@@ -356,7 +356,7 @@ class ReportingRatesReport(MultiReport):
     def reporting_rates(self):
         complete = 0
         incomplete = 0
-        all_locations_count = self.report_location.get_descendants().count()
+        all_locations_count = self.location.get_descendants().count()
         transactions = self.get_stock_transactions().values_list('case_id', 'product_id', 'report__date')
         grouped_by_case = {}
         parent_sum_rates = {}
@@ -374,12 +374,12 @@ class ReportingRatesReport(MultiReport):
             for supply_point in supply_points
         }
         aggregate_type = None
-        if self.report_location.location_type.name == 'country':
+        if self.location.location_type.name == 'country':
             aggregate_type = 'region'
-        elif self.report_location.location_type.name == 'region':
+        elif self.location.location_type.name == 'region':
             aggregate_type = 'district'
         if aggregate_type:
-            for location in self.report_location.get_children().filter(location_type__administrative=True):
+            for location in self.location.get_children().filter(location_type__administrative=True):
                 parent_sum_rates[location.name] = {
                     'complete': 0,
                     'incomplete': 0,
@@ -473,7 +473,7 @@ class ReportingRatesReport(MultiReport):
             NonReporting(config=config),
             InCompleteReports(config=config)
         ]
-        location = self.active_location
+        location = self.location
         if location.location_type.name.lower() in ['country', 'region']:
             providers.insert(2, SummaryReportingRates(config=config))
 
@@ -488,7 +488,7 @@ class ReportingRatesReport(MultiReport):
             NonReporting(config=config),
             InCompleteReports(config=config)
         ]
-        if self.active_location.location_type.name.lower() in ['country', 'region']:
+        if self.location.location_type.name.lower() in ['country', 'region']:
             providers = [SummaryReportingRates(config=config)] + providers
 
         return providers
@@ -541,7 +541,7 @@ class ReportingRatesReport(MultiReport):
         non_reporting['title'] = 'Non reporting'
         reports = [non_reporting,
                    self.report_context['reports'][-1]['report_table']]
-        if self.report_location.location_type.name.lower() in ['country', 'region']:
+        if self.location.location_type.name.lower() in ['country', 'region']:
             reports = [self.report_context['reports'][-3]['report_table']] + reports
         return [self._export(r['title'], r['headers'], r['rows']) for r in reports]
 

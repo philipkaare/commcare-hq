@@ -6,7 +6,6 @@ import os
 import re
 import sys
 import traceback
-import uuid
 
 from django.conf import settings
 from django.contrib import messages
@@ -33,6 +32,7 @@ from django.template.context import RequestContext
 from restkit import Resource
 
 from corehq.apps.accounting.models import Subscription
+from corehq.apps.app_manager.models import Application
 from corehq.apps.domain.decorators import require_superuser, login_and_domain_required
 from corehq.apps.domain.utils import normalize_domain_name, get_domain_from_url
 from corehq.apps.dropbox.decorators import require_dropbox_session
@@ -48,12 +48,14 @@ from corehq.apps.users.util import format_username
 from corehq.apps.hqwebapp.doc_info import get_doc_info
 from corehq.util.cache_utils import ExponentialBackoff
 from corehq.util.context_processors import get_domain_type
+from corehq.util.datadog.utils import create_datadog_event
 from dimagi.utils.couch.database import get_db
 from dimagi.utils.decorators.memoized import memoized
 from dimagi.utils.logging import notify_exception, notify_js_exception
 from dimagi.utils.web import get_url_base, json_response, get_site_domain
+from dimagi.utils.couch.cache.cache_core import get_redis_default_cache
+from corehq.apps.hqadmin.management.commands.celery_deploy_in_progress import CELERY_DEPLOY_IN_PROGRESS_FLAG
 from corehq.apps.domain.models import Domain
-from couchforms.models import XFormInstance
 from soil import heartbeat, DownloadBase
 from soil import views as soil_views
 
@@ -77,10 +79,16 @@ def couch_check():
     # work, and if other error handling allows the request to get this far.
 
     try:
-        xforms = XFormInstance.view('reports_forms/all_forms', limit=1).all()
-    except:
-        xforms = None
-    return (isinstance(xforms, list), None)
+        results = Application.view('app_manager/builds_by_date', limit=1).all()
+    except Exception:
+        return False, None
+    else:
+        return isinstance(results, list), None
+
+
+def is_deploy_in_progress():
+    cache = get_redis_default_cache()
+    return cache.get(CELERY_DEPLOY_IN_PROGRESS_FLAG) is not None
 
 
 def celery_check():
@@ -91,12 +99,15 @@ def celery_check():
         app.config_from_object(settings)
         i = app.control.inspect()
         ping = i.ping()
-        if not ping:
+        if not ping and not is_deploy_in_progress():
             chk = (False, 'No running Celery workers were found.')
         else:
             chk = (True, None)
     except IOError as e:
-        chk = (False, "Error connecting to the backend: " + str(e))
+        if is_deploy_in_progress():
+            chk = (True, None)
+        else:
+            chk = (False, "Error connecting to the backend: " + str(e))
     except ImportError as e:
         chk = (False, str(e))
 
@@ -108,22 +119,22 @@ def hb_check():
     if celery_monitoring:
         try:
             cresource = Resource(celery_monitoring, timeout=3)
-            t = cresource.get("api/workers").body_string()
+            t = cresource.get("api/workers", params_dict={'status': True}).body_string()
             all_workers = json.loads(t)
             bad_workers = []
-            for hostname, w in all_workers.items():
-                if not w['status']:
+            for hostname, status in all_workers.items():
+                if not status:
                     bad_workers.append('* {} celery worker down'.format(hostname))
             if bad_workers:
                 return (False, '\n'.join(bad_workers))
             else:
                 hb = heartbeat.is_alive()
-        except:
-            hb = False
+        except Exception:
+            hb = is_deploy_in_progress()
     else:
         try:
             hb = heartbeat.is_alive()
-        except:
+        except Exception:
             hb = False
     return (hb, None)
 
@@ -260,7 +271,7 @@ def server_up(req):
             "check_func": hb_check
         },
         "celery": {
-            "always_check": False,
+            "always_check": True,
             "message": "* celery is down",
             "check_func": celery_check
         },
@@ -293,6 +304,10 @@ def server_up(req):
                 else:
                     message.append(check_info['message'])
     if failed:
+        create_datadog_event(
+            'Serverup check failed', '\n'.join(message),
+            alert_type='error', aggregation_key='serverup',
+        )
         return HttpResponse('<br>'.join(message), status=500)
     else:
         return HttpResponse("success")
@@ -405,7 +420,7 @@ def retrieve_download(req, domain, download_id, template="style/includes/file_do
 
 
 def dropbox_next_url(request, download_id):
-    return request.META.get('HTTP_REFERER', '/')
+    return request.POST.get('dropbox-next', None) or request.META.get('HTTP_REFERER', '/')
 
 
 @login_required
@@ -984,25 +999,19 @@ def quick_find(request):
             messages.info(request, _("We've redirected you to the %s matching your query") % doc_info.type_display)
             return HttpResponseRedirect(doc_info.link)
         elif request.couch_user.is_superuser:
-            return HttpResponseRedirect('{}?id={}'.format(reverse('doc_in_es'), doc.get('_id')))
+            return HttpResponseRedirect('{}?id={}'.format(reverse('raw_couch'), doc.get('_id')))
         else:
             return json_response(doc_info)
 
-    try:
-        doc = get_db().get(query)
-    except ResourceNotFound:
-        pass
+    for db_name in (None, 'users', 'receiverwrapper', 'meta'):
+        try:
+            doc = get_db(db_name).get(query)
+        except ResourceNotFound:
+            pass
+        else:
+            return deal_with_couch_doc(doc)
     else:
-        return deal_with_couch_doc(doc)
-
-    try:
-        doc = Repeater.get_db().get(query)
-    except ResourceNotFound:
-        pass
-    else:
-        return deal_with_couch_doc(doc)
-
-    raise Http404()
+        raise Http404()
 
 
 def osdd(request, template='osdd.xml'):
