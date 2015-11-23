@@ -42,7 +42,8 @@ hqdjango2-staging.internal.commcarehq.org elasticsearch_node_name=hqdjango2-stag
 hqdb0-staging.internal.commcarehq.org
 
 [stanchion]
-hqdjango1-staging.internal.commcarehq.org
+hqdb0-staging.internal.commcarehq.org
 
 [riakcs]
-hqdb0-staging.internal.commcarehq.org
+hqdjango2-staging.internal.commcarehq.org
+hqdjango3-staging.internal.commcarehq.org
