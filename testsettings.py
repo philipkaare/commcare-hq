@@ -8,7 +8,7 @@ TEST_RUNNER = 'django_nose.NoseTestSuiteRunner'
 NOSE_ARGS = [
     #'--with-migrations' # adds ~30s to test run; TODO travis should use it
     #'--with-doctest', # adds 5s to discovery (before tests start); TODO travis should use it
-    '--with-fixture-bundling',
+    #'--with-fixture-bundling',
     '--logging-clear-handlers',
 ]
 NOSE_PLUGINS = [
@@ -30,7 +30,7 @@ for key, value in {
         'corehq/apps/cloudcare/tests/selenium',
         'corehq/apps/reports/tests/selenium',
         'scripts',
-        'testapps',
+        #'testapps', TODO revisit this
 
         # excludes for --with-doctest
         # these cause gevent.threading to be imported, which causes this error:
@@ -73,3 +73,6 @@ def _clean_up_logging_output():
             item["propagate"] = True
 
 _clean_up_logging_output()
+
+# uncomment when using nose --debug=... option to enable nose debug logging
+#LOGGING = {}
