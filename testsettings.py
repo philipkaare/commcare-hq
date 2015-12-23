@@ -2,7 +2,7 @@ from settings import *
 
 INSTALLED_APPS += (
     'django_nose',
-)
+) + TEST_APPS
 
 TEST_RUNNER = 'django_nose.NoseTestSuiteRunner'
 NOSE_ARGS = [
@@ -27,6 +27,8 @@ for key, value in {
     'NOSE_IGNORE_FILES': '^(localsettings|record_deploy_success\.py)',
 
     'NOSE_EXCLUDE_DIRS': ';'.join([
+        'corehq/apps/cloudcare/tests/selenium',
+        'corehq/apps/reports/tests/selenium',
         'scripts',
         'testapps',
 
@@ -42,8 +44,7 @@ for key, value in {
     os.environ.setdefault(key, value)
 del key, value
 
-# HqTestSuiteRunner settings
-INSTALLED_APPS = INSTALLED_APPS + list(TEST_APPS)
+
 CELERY_ALWAYS_EAGER = True
 # keep a copy of the original PILLOWTOPS setting around in case other tests want it.
 _PILLOWTOPS = PILLOWTOPS
@@ -60,6 +61,8 @@ ENABLE_PRELOGIN_SITE = True
 
 
 def _set_couchdb_test_settings():
+    # django automatically renames DATABASES when running tests
+    # do the same for couchdb
     import settingshelper
 
     def get_test_db_name(dbname):
@@ -84,12 +87,9 @@ _set_couchdb_test_settings()
 
 
 def _clean_up_logging_output():
-    import logging
-    logging.getLogger('raven').setLevel('WARNING')
-
     # make all loggers propagate to prevent
     # "No handlers could be found for logger ..."
-    # (a side effect of --logging-clear-handlers)
+    # (a side effect of nose option --logging-clear-handlers)
     for item in LOGGING["loggers"].values():
         if not item.get("propagate", True):
             item["propagate"] = True
