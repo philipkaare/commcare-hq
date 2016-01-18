@@ -1,0 +1,19 @@
+# fab/pillows/esupgrade.yml
+---
+exclude_groups:
+  - experimental
+  - cache
+  - core_ext
+  - core
+include_pillows:
+  - corehq.pillows.case.CasePillow
+  - corehq.pillows.xform.XFormPillow
+  - corehq.pillows.domain.DomainPillow
+  - corehq.pillows.user.UserPillow
+  - corehq.pillows.application.AppPillow
+  - corehq.pillows.group.GroupPillow
+  - corehq.pillows.sms.SMSPillow
+  - corehq.pillows.user.GroupToUserPillow
+  - corehq.pillows.user.UnknownUsersPillow
+  - corehq.pillows.reportcase.ReportCasePillow
+  - corehq.pillows.reportxform.ReportXFormPillow

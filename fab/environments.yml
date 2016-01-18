@@ -157,6 +157,10 @@ production:
         concurrency: 2
       flower: {}
 
+esupgrade:
+  environment: esupgrade
+  should_migrate: False
+
 staging:
   environment: staging
   should_migrate: True
