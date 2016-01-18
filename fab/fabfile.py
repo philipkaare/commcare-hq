@@ -273,7 +273,7 @@ def production():
 
 
 @task
-def esupgrade():
+def esupgrade_prod():
     """www.commcarehq.org"""
     if env.code_branch != 'hqes2-3':
         branch_message = (
@@ -284,7 +284,23 @@ def esupgrade():
             utils.abort('Action aborted.')
 
     load_env('esupgrade')
-    env.inventory = os.path.join('fab', 'inventory', 'esupgrade')
+    env.inventory = os.path.join('fab', 'inventory', 'esupgrade-prod')
+    execute(env_common)
+
+
+@task
+def esupgrade_softlayer():
+    """www.commcarehq.org"""
+    if env.code_branch != 'hqes2-3':
+        branch_message = (
+            "Woah there bud! You're using branch {env.code_branch} while executing with env 'esupgrade'"
+            "ARE YOU DOING SOMETHING EXCEPTIONAL THAT WARRANTS THIS?"
+        ).format(env=env)
+        if not console.confirm(branch_message, default=False):
+            utils.abort('Action aborted.')
+
+    load_env('esupgrade')
+    env.inventory = os.path.join('fab', 'inventory', 'esupgrade-softlayer')
     execute(env_common)
 
 
