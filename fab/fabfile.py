@@ -44,17 +44,17 @@ from fabric.contrib import files, console
 from fabric.operations import require, local, prompt
 
 
-ROLES_ALL_SRC = ['pg', 'django_monolith', 'django_app', 'django_celery', 'django_pillowtop', 'formsplayer', 'staticfiles']
-ROLES_ALL_SERVICES = ['django_monolith', 'django_app', 'django_celery', 'django_pillowtop', 'formsplayer', 'staticfiles']
-ROLES_CELERY = ['django_monolith', 'django_celery']
-ROLES_PILLOWTOP = ['django_monolith', 'django_pillowtop']
-ROLES_DJANGO = ['django_monolith', 'django_app']
-ROLES_TOUCHFORMS = ['django_monolith', 'formsplayer']
-ROLES_STATIC = ['django_monolith', 'staticfiles']
-ROLES_SMS_QUEUE = ['django_monolith', 'sms_queue']
-ROLES_REMINDER_QUEUE = ['django_monolith', 'reminder_queue']
-ROLES_PILLOW_RETRY_QUEUE = ['django_monolith', 'pillow_retry_queue']
-ROLES_DB_ONLY = ['pg', 'django_monolith']
+ROLES_ALL_SRC = ['django_pillowtop']
+ROLES_ALL_SERVICES = ['django_pillowtop']
+ROLES_CELERY = []
+ROLES_PILLOWTOP = ['django_pillowtop']
+ROLES_DJANGO = []
+ROLES_TOUCHFORMS = []
+ROLES_STATIC = []
+ROLES_SMS_QUEUE = []
+ROLES_REMINDER_QUEUE = []
+ROLES_PILLOW_RETRY_QUEUE = []
+ROLES_DB_ONLY = []
 
 if env.ssh_config_path and os.path.isfile(os.path.expanduser(env.ssh_config_path)):
     env.use_ssh_config = True
@@ -269,6 +269,22 @@ def production():
 
     load_env('production')
     env.inventory = os.path.join('fab', 'inventory', 'production')
+    execute(env_common)
+
+
+@task
+def esupgrade():
+    """www.commcarehq.org"""
+    if env.code_branch != 'hqes2-3':
+        branch_message = (
+            "Woah there bud! You're using branch {env.code_branch} while executing with env 'esupgrade'"
+            "ARE YOU DOING SOMETHING EXCEPTIONAL THAT WARRANTS THIS?"
+        ).format(env=env)
+        if not console.confirm(branch_message, default=False):
+            utils.abort('Action aborted.')
+
+    load_env('esupgrade')
+    env.inventory = os.path.join('fab', 'inventory', 'esupgrade')
     execute(env_common)
 
 
@@ -703,8 +719,8 @@ def copy_components():
 
 def copy_release_files():
     execute(copy_localsettings)
-    execute(copy_tf_localsettings)
-    execute(copy_components)
+    # execute(copy_tf_localsettings)
+    # execute(copy_components)
 
 
 @task
@@ -1166,7 +1182,7 @@ def set_pillowtop_supervisorconf():
         # preview environment should not run pillowtop and index stuff
         # just rely on what's on staging
         _rebuild_supervisor_conf_file('make_supervisor_pillowtop_conf', 'supervisor_pillowtop.conf')
-        _rebuild_supervisor_conf_file('make_supervisor_conf', 'supervisor_form_feed.conf')
+        # _rebuild_supervisor_conf_file('make_supervisor_conf', 'supervisor_form_feed.conf')
 
 
 @roles(ROLES_DJANGO)
@@ -1213,15 +1229,15 @@ def set_supervisor_config():
 def _set_supervisor_config():
     """Upload and link Supervisor configuration from the template."""
     _require_target()
-    _execute_with_timing(set_celery_supervisorconf)
-    _execute_with_timing(set_djangoapp_supervisorconf)
-    _execute_with_timing(set_errand_boy_supervisorconf)
-    _execute_with_timing(set_formsplayer_supervisorconf)
+    # _execute_with_timing(set_celery_supervisorconf)
+    # _execute_with_timing(set_djangoapp_supervisorconf)
+    # _execute_with_timing(set_errand_boy_supervisorconf)
+    # _execute_with_timing(set_formsplayer_supervisorconf)
     _execute_with_timing(set_pillowtop_supervisorconf)
-    _execute_with_timing(set_sms_queue_supervisorconf)
-    _execute_with_timing(set_reminder_queue_supervisorconf)
-    _execute_with_timing(set_pillow_retry_queue_supervisorconf)
-    _execute_with_timing(set_websocket_supervisorconf)
+    # _execute_with_timing(set_sms_queue_supervisorconf)
+    # _execute_with_timing(set_reminder_queue_supervisorconf)
+    # _execute_with_timing(set_pillow_retry_queue_supervisorconf)
+    # _execute_with_timing(set_websocket_supervisorconf)
 
     # if needing tunneled ES setup, comment this back in
     # execute(set_elasticsearch_supervisorconf)
