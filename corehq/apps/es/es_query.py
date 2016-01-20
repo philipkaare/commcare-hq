@@ -88,10 +88,11 @@ Language
 from collections import namedtuple
 from copy import deepcopy
 import json
+from corehq.apps.es.utils import values_list, flatten_field_dict
 
 from dimagi.utils.decorators.memoized import memoized
 
-from corehq.elastic import ES_URLS, ESError, run_query, SIZE_LIMIT
+from corehq.elastic import ES_META, ESError, run_query, SIZE_LIMIT
 
 from . import facets
 from . import filters
@@ -127,9 +128,9 @@ class ESQuery(object):
 
     def __init__(self, index=None):
         self.index = index if index is not None else self.index
-        if self.index not in ES_URLS:
+        if self.index not in ES_META:
             msg = "%s is not a valid ES index.  Available options are: %s" % (
-                index, ', '.join(ES_URLS.keys()))
+                index, ', '.join(ES_META.keys()))
             raise IndexError(msg)
         self._default_filters = deepcopy(self.default_filters)
         self._facets = []
@@ -175,7 +176,7 @@ class ESQuery(object):
 
     def run(self):
         """Actually run the query.  Returns an ESQuerySet object."""
-        raw = run_query(self.url, self.raw_query)
+        raw = run_query(self.index, self.raw_query)
         return ESQuerySet(raw, deepcopy(self))
 
     @property
@@ -208,8 +209,8 @@ class ESQuery(object):
     def terms_facet(self, term, name, size=None):
         return self.facet(facets.TermsFacet(term, name, size))
 
-    def date_histogram(self, name, datefield, interval):
-        return self.facet(facets.DateHistogram(name, datefield, interval))
+    def date_histogram(self, name, datefield, interval, timezone=None):
+        return self.facet(facets.DateHistogram(name, datefield, interval, timezone=None))
 
     @property
     def _query(self):
@@ -277,10 +278,6 @@ class ESQuery(object):
         """pretty prints the JSON query that will be sent to elasticsearch."""
         print self.dumps(pretty=True)
 
-    @property
-    def url(self):
-        return ES_URLS[self.index]
-
     def sort(self, field, desc=False):
         """Order the results by field."""
         query = deepcopy(self)
@@ -300,7 +297,23 @@ class ESQuery(object):
         query = deepcopy(self)
         if default in query._default_filters:
             query._default_filters.pop(default)
+        if len(query._default_filters) == 0:
+            query._default_filters = {"match_all": filters.match_all()}
         return query
+
+    def values(self, *fields):
+        """modeled after django's QuerySet.values"""
+        if fields:
+            return self.fields(fields).run().hits
+        else:
+            return self.run().hits
+
+    def values_list(self, *fields, **kwargs):
+        return values_list(self.fields(fields).run().hits, *fields, **kwargs)
+
+    def count(self):
+        """Performs a minimal query to get the count of matching documents"""
+        return self.size(0).run().total
 
 
 class ESQuerySet(object):
@@ -311,11 +324,10 @@ class ESQuerySet(object):
     """
     def __init__(self, raw, query):
         if 'error' in raw:
-            msg = ("ElasticSearch Error\n{error}\nIndex: {index}\nURL:{url}"
+            msg = ("ElasticSearch Error\n{error}\nIndex: {index}"
                    "\nQuery: {query}").format(
                        error=raw['error'],
                        index=query.index,
-                       url=query.url,
                        query=query.dumps(pretty=True),
                     )
             raise ESError(msg)
@@ -337,7 +349,7 @@ class ESQuerySet(object):
         if self.query._fields == []:
             return self.ids
         elif self.query._fields is not None:
-            return [r['fields'] for r in self.raw_hits]
+            return [flatten_field_dict(r) for r in self.raw_hits]
         else:
             return [r['_source'] for r in self.raw_hits]
 
@@ -368,6 +380,9 @@ class ESQuerySet(object):
         raw = self.raw.get('facets', {})
         results = namedtuple('facet_results', [f.name for f in facets])
         return results(**{f.name: f.parse_result(raw) for f in facets})
+
+    def __repr__(self):
+        return '{}({!r}, {!r})'.format(self.__class__.__name__, self.raw, self.query)
 
 
 class HQESQuery(ESQuery):

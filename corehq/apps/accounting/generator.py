@@ -17,6 +17,10 @@ from corehq.apps.accounting.models import (
     DefaultProductPlan, SubscriptionAdjustment,
     SoftwarePlanEdition, BillingContactInfo, SubscriptionType,
 )
+from corehq.apps.smsbillables.models import (
+    SmsGatewayFee, SmsGatewayFeeCriteria, SmsUsageFee, SmsUsageFeeCriteria,
+    SmsBillable,
+)
 from corehq.apps.domain.models import Domain
 from corehq.apps.users.models import WebUser, CommCareUser
 
@@ -84,7 +88,7 @@ def arbitrary_contact_info(account, web_user_creator):
         account=account,
         first_name=data_gen.arbitrary_firstname(),
         last_name=data_gen.arbitrary_lastname(),
-        emails=web_user_creator.username,
+        email_list=[web_user_creator.username],
         phone_number="+15555555",
         company_name="Company Name",
         first_line="585 Mass Ave",
@@ -98,6 +102,11 @@ def arbitrary_contact_info(account, web_user_creator):
 def delete_all_accounts():
     BillingContactInfo.objects.all().delete()
     BillingAccount.objects.all().delete()
+    SmsBillable.objects.all().delete()
+    SmsGatewayFee.objects.all().delete()
+    SmsGatewayFeeCriteria.objects.all().delete()
+    SmsUsageFee.objects.all().delete()
+    SmsUsageFeeCriteria.objects.all().delete()
     Currency.objects.all().delete()
 
 

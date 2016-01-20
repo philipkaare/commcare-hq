@@ -1,7 +1,7 @@
 from datetime import datetime, time
 from corehq import privileges
-from corehq.apps.app_manager.dbaccessors import get_app
-from corehq.apps.app_manager.models import ApplicationBase, Form
+from corehq.apps.app_manager.dbaccessors import get_app, get_app_ids_in_domain
+from corehq.apps.app_manager.models import Form
 from couchdbkit.resource import ResourceNotFound
 from django.utils.translation import ugettext as _
 from corehq.apps.casegroups.dbaccessors import get_case_groups_in_domain
@@ -10,6 +10,7 @@ from corehq.apps.groups.models import Group
 from corehq.apps.locations.models import SQLLocation
 from corehq.apps.sms.mixin import apply_leniency, CommCareMobileContactMixin, InvalidFormatException
 from corehq.apps.users.models import CommCareUser, CouchUser
+from corehq.util.quickcache import quickcache
 from casexml.apps.case.models import CommCareCase
 from django_prbac.utils import has_privilege
 
@@ -54,8 +55,8 @@ class DotExpandedDict(dict):
 
 def get_form_list(domain):
     form_list = []
-    for app in ApplicationBase.view("app_manager/applications_brief", startkey=[domain], endkey=[domain, {}]):
-        latest_app = get_app(domain, app._id, latest=True)
+    for app_id in get_app_ids_in_domain(domain):
+        latest_app = get_app(domain, app_id, latest=True)
         if latest_app.doc_type == "Application":
             for m in latest_app.get_modules():
                 for f in m.get_forms():
@@ -251,3 +252,13 @@ def get_unverified_number_for_recipient(recipient):
 
 def get_preferred_phone_number_for_recipient(recipient):
     return get_verified_number_for_recipient(recipient) or get_unverified_number_for_recipient(recipient)
+
+
+@quickcache(['reminder_id'], timeout=60 * 60 * 24 * 7 * 5)
+def get_reminder_domain(reminder_id):
+    """
+    A reminder instance's domain should never change once set, so
+    we can use a very long timeout.
+    """
+    from corehq.apps.reminders.models import CaseReminder
+    return CaseReminder.get(reminder_id).domain

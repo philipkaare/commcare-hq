@@ -1,4 +1,5 @@
 # Stub models file
+from corehq.apps.change_feed import topics
 from dimagi.ext.couchdbkit import Document
 # ensure our signals get loaded at django bootstrap time
 from . import signals
@@ -99,6 +100,7 @@ class UCLAPatientFluff(fluff.IndicatorDocument):
 
     group_by = ('domain', )
     save_direct_to_sql = True
+    kafka_topic = topics.CASE
 
     name = flat_field(lambda case: case.full_name)
     mrn = flat_field(lambda case: case['mrn'])

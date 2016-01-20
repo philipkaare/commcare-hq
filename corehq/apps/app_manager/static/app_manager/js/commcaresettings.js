@@ -146,11 +146,13 @@ function CommcareSettings(options) {
             var optionOK = setting.optionOK();
             if (!setting.enabled() || !optionOK) {
                 if (!optionOK) {
+                    var upgrade_text;
                     if (setting.versionOK()) {
-                        return 'Upgrade to CommCare ' + setting.requiredVersion().option + ' for this option!';
+                        upgrade_text = gettext('Upgrade to CommCare %s for this option!');
                     } else {
-                        return 'Upgrade to CommCare ' + setting.requiredVersion().option + '!';
+                        upgrade_text = gettext('Upgrade to CommCare %s!');
                     }
+                    return interpolate(upgrade_text, [setting.requiredVersion().option]);
                 } else {
                     var condition = setting.parsedCondition();
                     var names = _(condition.settings).map(function (setting) {
@@ -159,7 +161,7 @@ function CommcareSettings(options) {
                     uniqueNames = names.filter(function(elem, pos) {
                         return names.indexOf(elem) == pos;
                     })
-                    return 'Auto-set by ' + uniqueNames.join(', ')
+                    return gettext('Auto-set by ') + uniqueNames.join(', ')
                 }
             } else {
                 return '';
@@ -426,7 +428,7 @@ $(function () {
     ko.bindingHandlers.passwordSetter = {
         init: function (element, valueAccessor) {
             var observableValue = valueAccessor();
-            $(element).password_setter({title: ''});
+            $(element).password_setter();
             $(element).on('textchange change', function () {
                 observableValue($(element).val());
             });

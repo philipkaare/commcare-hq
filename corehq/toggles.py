@@ -169,6 +169,13 @@ APP_BUILDER_SHADOW_MODULES = StaticToggle(
     help_link='https://confluence.dimagi.com/display/ccinternal/Shadow+Modules',
 )
 
+APP_AWARE_SYNC = StaticToggle(
+    'app_aware_sync',
+    'App-aware Sync',
+    TAG_PRODUCT_PATH,
+    [NAMESPACE_DOMAIN]
+)
+
 BOOTSTRAP3_PREVIEW = StaticToggle(
     'bootstrap3_preview',
     'Bootstrap 3 Preview',
@@ -438,13 +445,6 @@ VELLUM_SAVE_TO_CASE = StaticToggle(
     [NAMESPACE_DOMAIN]
 )
 
-VELLUM_ADVANCED_ITEMSETS = StaticToggle(
-    'advanced_itemsets',
-    "Allows a user to configure itemsets for more than lookup tables",
-    TAG_EXPERIMENTAL,
-    [NAMESPACE_DOMAIN]
-)
-
 VELLUM_EXPERIMENTAL_UI = StaticToggle(
     'experimental_ui',
     "Enables some experimental UI enhancements for the form builder",
@@ -673,15 +673,6 @@ EWS_BROADCAST_BY_ROLE = StaticToggle(
     [NAMESPACE_DOMAIN],
 )
 
-
-AUTOMATIC_CASE_CLOSURE = StaticToggle(
-    'automatic_case_closure',
-    'Automatically Close Cases',
-    TAG_PRODUCT_PATH,
-    [NAMESPACE_DOMAIN],
-)
-
-
 SMS_PERFORMANCE_FEEDBACK = StaticToggle(
     'sms_performance_feedback',
     'Enable SMS-based performance feedback',
@@ -743,5 +734,33 @@ GRID_MENUS = StaticToggle(
     'grid_menus',
     'Allow using grid menus on Android',
     TAG_ONE_OFF,
+    [NAMESPACE_DOMAIN]
+)
+
+TF_USES_SQLITE_BACKEND = StaticToggle(
+    'tf_sql_backend',
+    'Use a SQLite backend for Touchforms',
+    TAG_PRODUCT_PATH,
+    [NAMESPACE_DOMAIN]
+)
+
+SECURE_SESSIONS_CHECKBOX = StaticToggle(
+    'secure_sessions_checkbox',
+    'Show secure sessions checkbox',
+    TAG_PRODUCT_PATH,
+    [NAMESPACE_DOMAIN]
+)
+
+CUSTOM_APP_BASE_URL = StaticToggle(
+    'custom_app_base_url',
+    'Allow specifying a custom base URL for an application. Main use case is to allow migrating ICDS to a new cluster.',
+    TAG_ONE_OFF,
+    [NAMESPACE_DOMAIN]
+)
+
+TF_USES_SQLITE_BACKEND = StaticToggle(
+    'tf_sql_backend',
+    'Use a SQLite backend for Touchforms',
+    TAG_PRODUCT_PATH,
     [NAMESPACE_DOMAIN]
 )

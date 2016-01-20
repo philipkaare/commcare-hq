@@ -13,6 +13,7 @@ from django.db import models
 from dimagi.utils.decorators.memoized import memoized
 from dimagi.utils.mixins import UnicodeMixIn
 from dimagi.utils.couch import LooselyEqualDocumentSchema
+from dimagi.utils.couch.database import get_db
 from casexml.apps.case import const
 from casexml.apps.case.sharedmodels import CommCareCaseIndex, IndexHoldingMixIn
 from casexml.apps.phone.checksum import Checksum, CaseStateHash
@@ -135,6 +136,11 @@ class AbstractSyncLog(SafeSaveDocument, UnicodeMixIn):
     error_hash = StringProperty()
 
     strict = True  # for asserts
+
+    @classmethod
+    def get(cls, doc_id):
+        doc = get_sync_log_doc(doc_id)
+        return cls.wrap(doc)
 
     def _assert(self, conditional, msg="", case_id=None):
         if not conditional:
@@ -358,7 +364,7 @@ class SyncLog(AbstractSyncLog):
         removed_states = {}
         new_indices = set()
         for case in case_list:
-            actions = case.get_actions_for_form(xform.form_id)
+            actions = case.get_actions_for_form(xform)
             for action in actions:
                 logger.debug('OLD {}: {}'.format(case.case_id, action.action_type))
                 if action.action_type == const.CASE_ACTION_CREATE:
@@ -737,8 +743,10 @@ class SimplifiedSyncLog(AbstractSyncLog):
         incoming_extensions = _reverse_index_map(self.extension_index_tree.indices)
         live = {case for case in available if case in self.primary_case_ids}
         new_live = set() | live
+        checked = set()
         while new_live:
             case_to_check = new_live.pop()
+            checked.add(case_to_check)
             new_live = new_live | IndexTree.get_all_outgoing_cases(
                 case_to_check,
                 self.index_tree,
@@ -749,7 +757,7 @@ class SimplifiedSyncLog(AbstractSyncLog):
                 self.extension_index_tree,
                 self.closed_cases, cached_map=incoming_extensions
             )
-            new_live = new_live - live
+            new_live = new_live - checked
             live = live | new_live
 
         logger.debug("live cases: {}".format(live))
@@ -893,16 +901,17 @@ class SimplifiedSyncLog(AbstractSyncLog):
                     owner_id_map[case_id] = owner_id_from_action
             return owner_id_map.get(case_id, None)
 
+
         all_updates = {}
         for case in case_list:
-            if case._id not in all_updates:
+            if case.case_id not in all_updates:
                 logger.debug('initializing update for case {}'.format(case.case_id))
-                all_updates[case._id] = CaseUpdate(case_id=case.case_id,
+                all_updates[case.case_id] = CaseUpdate(case_id=case.case_id,
                                                    owner_ids_on_phone=self.owner_ids_on_phone)
 
             case_update = all_updates[case.case_id]
             case_update.was_live_previously = case.case_id in self.primary_case_ids
-            actions = case.get_actions_for_form(xform.form_id)
+            actions = case.get_actions_for_form(xform)
             for action in actions:
                 logger.debug('{}: {}'.format(case.case_id, action.action_type))
                 owner_id = get_latest_owner_id(case.case_id, action)
@@ -1063,8 +1072,17 @@ def _domain_has_legacy_toggle_set():
     # old versions of commcare (< 2.10ish) didn't purge on form completion
     # so can still modify cases that should no longer be on the phone.
     request = get_request()
-    domain = request.domain if request else None
+    domain = getattr(request, 'domain', None)
     return LEGACY_SYNC_SUPPORT.enabled(domain) if domain else False
+
+
+def get_sync_log_doc(doc_id):
+    try:
+        return SyncLog.get_db().get(doc_id)
+    except ResourceNotFound:
+        legacy_doc = get_db(None).get(doc_id, attachments=True)
+        del legacy_doc['_rev']  # remove the rev so we can save this to the new DB
+        return legacy_doc
 
 
 def get_properly_wrapped_sync_log(doc_id):
@@ -1072,7 +1090,7 @@ def get_properly_wrapped_sync_log(doc_id):
     Looks up and wraps a sync log, using the class based on the 'log_format' attribute.
     Defaults to the existing legacy SyncLog class.
     """
-    return properly_wrap_sync_log(SyncLog.get_db().get(doc_id))
+    return properly_wrap_sync_log(get_sync_log_doc(doc_id))
 
 
 def properly_wrap_sync_log(doc):

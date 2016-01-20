@@ -1,4 +1,3 @@
-from datetime import datetime
 import json
 from django.contrib import messages
 from django.core.exceptions import PermissionDenied
@@ -6,37 +5,35 @@ from django.forms.formsets import formset_factory
 from django.http import HttpResponse, HttpResponseRedirect
 from django.http.response import Http404
 from django.shortcuts import get_object_or_404
+from django.utils.decorators import method_decorator
 from django.utils.translation import ugettext_noop
 from django.views.decorators.http import require_POST, require_GET
 from django.views.generic.base import RedirectView
-from corehq.apps.commtrack import const
 from corehq.apps.commtrack.models import StockState
-from corehq.apps.commtrack.sms import process
 from corehq.apps.commtrack.views import BaseCommTrackManageView
-from corehq.apps.domain.decorators import domain_admin_required
+from corehq.apps.consumption.shortcuts import get_default_monthly_consumption, \
+    set_default_consumption_for_supply_point
+from corehq.apps.domain.decorators import (
+    domain_admin_required,
+    login_and_domain_required,
+)
 from corehq.apps.domain.views import BaseDomainView
 from corehq.apps.locations.permissions import locations_access_required, user_can_edit_any_location
 from corehq.apps.products.models import Product, SQLProduct
 from corehq.apps.locations.models import SQLLocation
 from corehq.apps.users.models import WebUser, CommCareUser
-from corehq.form_processor.parsers.ledgers.helpers import StockTransactionHelper
 from custom.common import ALL_OPTION
-from custom.ewsghana.api import GhanaEndpoint, EWSApi
-from custom.ewsghana.filters import EWSDateFilter
 from custom.ewsghana.forms import InputStockForm, EWSUserSettings
+from custom.ewsghana.handlers.web_submission_handler import WebSubmissionHandler
 from custom.ewsghana.models import EWSGhanaConfig, FacilityInCharge, EWSExtension, EWSMigrationStats, \
     EWSMigrationProblem
+from custom.ewsghana.tasks import set_send_to_owner_field_task
 from custom.ewsghana.reports.specific_reports.dashboard_report import DashboardReport
 from custom.ewsghana.reports.specific_reports.stock_status_report import StockoutsProduct, StockStatus
-from custom.ewsghana.reports.stock_levels_report import InventoryManagementData, StockLevelsReport
-from custom.ewsghana.stock_data import EWSStockDataSynchronization
-from custom.ewsghana.tasks import ews_bootstrap_domain_task, ews_clear_stock_data_task, \
-    delete_last_migrated_stock_data, convert_user_data_fields_task, migrate_email_settings, \
-    delete_connections_field_task
-from custom.ewsghana.utils import make_url, has_input_stock_permissions
+from custom.ewsghana.reports.stock_levels_report import InventoryManagementData
+from custom.ewsghana.tasks import balance_migration_task, migrate_email_settings
+from custom.ewsghana.utils import make_url, has_input_stock_permissions, calculate_last_period, Msg
 from custom.ilsgateway.views import GlobalStats
-from custom.logistics.tasks import add_products_to_loc, locations_fix, resync_web_users
-from custom.logistics.tasks import stock_data_task
 from custom.logistics.views import BaseConfigView
 from dimagi.utils.dates import force_to_datetime
 from dimagi.utils.web import json_handler, json_response
@@ -64,6 +61,7 @@ class InputStockView(BaseDomainView):
     section_url = ""
     template_name = 'ewsghana/input_stock.html'
 
+    @method_decorator(login_and_domain_required)
     def dispatch(self, request, *args, **kwargs):
         couch_user = self.request.couch_user
         site_code = kwargs['site_code']
@@ -81,49 +79,30 @@ class InputStockView(BaseDomainView):
         formset = InputStockFormSet(request.POST)
         if formset.is_valid():
             try:
-                location = SQLLocation.objects.get(site_code=kwargs['site_code'], domain=self.domain)
+                sql_location = SQLLocation.objects.get(site_code=kwargs['site_code'], domain=self.domain)
             except SQLLocation.DoesNotExist:
                 raise Http404()
-            data = []
+            text = ''
             for form in formset:
                 product = Product.get(docid=form.cleaned_data['product_id'])
-                if form.cleaned_data['receipts']:
-                    data.append(
-                        StockTransactionHelper(
-                            domain=self.domain,
-                            location_id=location.location_id,
-                            case_id=location.supply_point_id,
-                            product_id=product.get_id,
-                            action=const.StockActions.RECEIPTS,
-                            quantity=form.cleaned_data['receipts']
-                        ),
-                    )
                 if form.cleaned_data['stock_on_hand'] is not None:
-                    data.append(
-                        StockTransactionHelper(
-                            domain=self.domain,
-                            location_id=location.location_id,
-                            case_id=location.supply_point_id,
-                            product_id=product.get_id,
-                            action=const.StockActions.STOCKONHAND,
-                            quantity=form.cleaned_data['stock_on_hand']
-                        ),
+                    text += '{} {}.{} '.format(
+                        product.code, form.cleaned_data['stock_on_hand'], form.cleaned_data['receipts'] or 0
                     )
-            if data:
-                unpacked_data = {
-                    'timestamp': datetime.utcnow(),
-                    'user': self.request.couch_user,
-                    'phone': 'ewsghana-input-stock',
-                    'location': location.couch_location,
-                    'transactions': data,
-                }
-                process(self.domain, unpacked_data)
+
+                amount = form.cleaned_data['default_consumption']
+                if amount is not None:
+                    set_default_consumption_for_supply_point(
+                        self.domain, product.get_id, sql_location.supply_point_id, amount
+                    )
+            if text:
+                WebSubmissionHandler(self.request.couch_user, self.domain, Msg(text), sql_location).handle()
             url = make_url(
-                StockLevelsReport,
+                StockStatus,
                 self.domain,
                 '?location_id=%s&filter_by_program=%s&startdate='
                 '&enddate=&report_type=&filter_by_product=%s',
-                (location.location_id, ALL_OPTION, ALL_OPTION)
+                (sql_location.location_id, ALL_OPTION, ALL_OPTION)
             )
             return HttpResponseRedirect(url)
         context = self.get_context_data(**kwargs)
@@ -156,6 +135,12 @@ class InputStockView(BaseDomainView):
                     'product': product.name,
                     'stock_on_hand': int(stock_on_hand),
                     'monthly_consumption': round(monthly_consumption) if monthly_consumption else 0,
+                    'default_consumption': get_default_monthly_consumption(
+                        self.domain,
+                        product.product_id,
+                        sql_location.location_type.name,
+                        sql_location.supply_point_id
+                    ),
                     'units': product.units
                 }
             )
@@ -200,50 +185,8 @@ class EWSUserExtensionView(BaseCommTrackManageView):
 
 @domain_admin_required
 @require_POST
-def sync_ewsghana(request, domain):
-    ews_bootstrap_domain_task.delay(domain)
-    return HttpResponse('OK')
-
-
-@domain_admin_required
-@require_POST
-def ews_sync_stock_data(request, domain):
-    config = EWSGhanaConfig.for_domain(domain)
-    domain = config.domain
-    endpoint = GhanaEndpoint.from_config(config)
-    stock_data_task.delay(EWSStockDataSynchronization(domain, endpoint))
-    return HttpResponse('OK')
-
-
-@domain_admin_required
-@require_POST
-def ews_clear_stock_data(request, domain):
-    ews_clear_stock_data_task.delay(domain)
-    return HttpResponse('OK')
-
-
-@domain_admin_required
-@require_POST
-def ews_resync_web_users(request, domain):
-    config = EWSGhanaConfig.for_domain(domain)
-    endpoint = GhanaEndpoint.from_config(config)
-    resync_web_users.delay(EWSApi(domain=domain, endpoint=endpoint))
-    return HttpResponse('OK')
-
-
-@domain_admin_required
-@require_POST
-def ews_fix_locations(request, domain):
-    locations_fix.delay(domain=domain)
-    return HttpResponse('OK')
-
-
-@domain_admin_required
-@require_POST
-def ews_add_products_to_locs(request, domain):
-    config = EWSGhanaConfig.for_domain(domain)
-    endpoint = GhanaEndpoint.from_config(config)
-    add_products_to_loc.delay(EWSApi(domain=domain, endpoint=endpoint))
+def balance_email_reports_migration(request, domain):
+    balance_migration_task.delay(domain)
     return HttpResponse('OK')
 
 
@@ -256,20 +199,8 @@ def migrate_email_settings_view(request, domain):
 
 @domain_admin_required
 @require_POST
-def delete_connections_field(request, domain):
-    delete_connections_field_task.delay(domain)
-    return HttpResponse('OK')
-
-
-@domain_admin_required
-@require_POST
-def delete_last_stock_data(request, domain):
-    delete_last_migrated_stock_data.delay(domain)
-    return HttpResponse('OK')
-
-
-def convert_user_data_fields(request, domain):
-    convert_user_data_fields_task.delay(domain)
+def fix_email_reports(request, domain):
+    set_send_to_owner_field_task.delay(domain)
     return HttpResponse('OK')
 
 
@@ -378,6 +309,19 @@ class BalanceMigrationView(BaseDomainView):
         }
 
 
+class BalanceEmailMigrationView(BaseDomainView):
+
+    template_name = 'ewsghana/email_balance.html'
+    section_name = 'Email Balance'
+    section_url = ''
+
+    @property
+    def page_context(self):
+        return {
+            'problems': EWSMigrationProblem.objects.filter(domain=self.domain)
+        }
+
+
 class DashboardPageView(RedirectView):
 
     def get_redirect_url(self, *args, **kwargs):
@@ -405,7 +349,7 @@ class DashboardPageView(RedirectView):
                         url = StockStatus.get_raw_url(domain, request=self.request)
                 except EWSExtension.DoesNotExist:
                     pass
-            start_date, end_date = EWSDateFilter.last_reporting_period()
+            start_date, end_date = calculate_last_period()
             url = '%s?location_id=%s&filter_by_program=%s&startdate=%s&enddate=%s' % (
                 url,
                 loc_id or '',

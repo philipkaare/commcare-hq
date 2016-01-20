@@ -1,10 +1,10 @@
 from datetime import datetime
 from itertools import imap
-import json
 import uuid
 from django.conf import settings
 from django.contrib.auth.models import AnonymousUser
 from django.template.loader import render_to_string
+from corehq.apps.app_manager.dbaccessors import get_brief_apps_in_domain
 from corehq.apps.domain.exceptions import DomainDeleteException
 from corehq.apps.tzmigration import set_migration_complete
 from corehq.dbaccessors.couchapps.all_docs import \
@@ -22,7 +22,6 @@ from django.utils.translation import ugettext_lazy as _
 from corehq.apps.appstore.models import SnapshotMixin
 from corehq.util.quickcache import skippable_quickcache
 from dimagi.utils.couch import CriticalSection
-from dimagi.utils.couch.cache import cache_core
 from dimagi.utils.couch.database import (
     iter_docs, get_safe_write_kwargs, apply_update, iter_bulk_delete
 )
@@ -329,6 +328,9 @@ class Domain(Document, SnapshotMixin):
     default_mobile_worker_redirect = StringProperty(default=None)
     last_modified = DateTimeProperty(default=datetime(2015, 1, 1))
 
+    # when turned on, users who enter the domain are logged out after 30 minutes of inactivity
+    secure_sessions = BooleanProperty(default=False)
+
     @property
     def domain_type(self):
         """
@@ -415,19 +417,15 @@ class Domain(Document, SnapshotMixin):
             return []
 
     @classmethod
-    def field_by_prefix(cls, field, prefix='', is_approved=True):
+    def field_by_prefix(cls, field, prefix=''):
         # unichr(0xfff8) is something close to the highest character available
         res = cls.view("domain/fields_by_prefix",
                        group=True,
-                       startkey=[field, is_approved, prefix],
-                       endkey=[field, is_approved, "%s%c" % (prefix, unichr(0xfff8)), {}])
+                       startkey=[field, True, prefix],
+                       endkey=[field, True, "%s%c" % (prefix, unichr(0xfff8)), {}])
         vals = [(d['value'], d['key'][2]) for d in res]
         vals.sort(reverse=True)
         return [(v[1], v[0]) for v in vals]
-
-    @classmethod
-    def get_by_field(cls, field, value, is_approved=True):
-        return cls.view('domain/fields_by_prefix', key=[field, is_approved, value], reduce=False, include_docs=True).all()
 
     def add(self, model_instance, is_active=True):
         """
@@ -440,10 +438,7 @@ class Domain(Document, SnapshotMixin):
         couch_user.save()
 
     def applications(self):
-        from corehq.apps.app_manager.models import ApplicationBase
-        return ApplicationBase.view('app_manager/applications_brief',
-                                    startkey=[self.name],
-                                    endkey=[self.name, {}]).all()
+        return get_brief_apps_in_domain(self.name)
 
     def full_applications(self, include_builds=True):
         from corehq.apps.app_manager.models import Application, RemoteApp
@@ -636,7 +631,7 @@ class Domain(Document, SnapshotMixin):
         from corehq.apps.app_manager.dbaccessors import get_app
         from corehq.apps.reminders.models import CaseReminderHandler
         from corehq.apps.fixtures.models import FixtureDataItem
-        from corehq.apps.app_manager.dbaccessors import get_apps_in_domain
+        from corehq.apps.app_manager.dbaccessors import get_brief_apps_in_domain
         from corehq.apps.domain.dbaccessors import get_doc_ids_in_domain_by_class
         from corehq.apps.fixtures.models import FixtureDataType
         from corehq.apps.users.models import UserRole
@@ -684,7 +679,7 @@ class Domain(Document, SnapshotMixin):
                 if app:
                     return app._id, app.doc_type
 
-            for app in get_apps_in_domain(self.name):
+            for app in get_brief_apps_in_domain(self.name):
                 doc_id, doc_type = app.get_id, app.doc_type
                 original_doc_id = doc_id
                 if copy_by_id and doc_id not in copy_by_id:
@@ -846,21 +841,6 @@ class Domain(Document, SnapshotMixin):
         else:
             return cls.view('domain/published_snapshots', endkey=[True], include_docs=True, descending=True, limit=limit, skip=skip)
 
-    @classmethod
-    def snapshot_search(cls, query, page=None, per_page=10):
-        skip = None
-        limit = None
-        if page:
-            skip = (page - 1) * per_page
-            limit = per_page
-        results = cls.get_db().search('domain/snapshot_search',
-            q=json.dumps(query),
-            limit=limit,
-            skip=skip,
-            #stale='ok',
-        )
-        return map(cls.get, [r['id'] for r in results]), results.total_rows
-
     def update_deployment(self, **kwargs):
         self.deployment.update(kwargs)
         self.save()
@@ -894,21 +874,30 @@ class Domain(Document, SnapshotMixin):
         return Domain.view('domain/copied_from_snapshot', keys=[s._id for s in self.copied_from.snapshots()], include_docs=True)
 
     def delete(self):
-        from corehq.apps.domain.signals import commcare_domain_pre_delete
+        self._pre_delete()
+        super(Domain, self).delete()
+        Domain.get_by_name.clear(Domain, self.name)  # clear the domain cache
 
+    def _pre_delete(self):
+        from corehq.apps.domain.signals import commcare_domain_pre_delete
+        from corehq.apps.domain.deletion import apply_deletion_operations
+
+        dynamic_deletion_operations = []
         results = commcare_domain_pre_delete.send_robust(sender='domain', domain=self)
         for result in results:
-            if result[1]:
-                raise DomainDeleteException(
-                    u"Error occurred during domain pre_delete {}: {}".format(self.name, str(result[1]))
-                )
+            response = result[1]
+            if isinstance(response, Exception):
+                raise DomainDeleteException(u"Error occurred during domain pre_delete {}: {}".format(self.name, str(response)))
+            elif response:
+                assert isinstance(response, list)
+                dynamic_deletion_operations.extend(response)
+
         # delete all associated objects
         for db, related_doc_ids in get_all_doc_ids_for_domain_grouped_by_db(self.name):
             iter_bulk_delete(db, related_doc_ids, chunksize=500)
+
         self._delete_web_users_from_domain()
-        self._delete_sql_objects()
-        super(Domain, self).delete()
-        Domain.get_by_name.clear(Domain, self.name)  # clear the domain cache
+        apply_deletion_operations(self.name, dynamic_deletion_operations)
 
     def _delete_web_users_from_domain(self):
         from corehq.apps.users.models import WebUser
@@ -917,52 +906,6 @@ class Domain(Document, SnapshotMixin):
         for web_user in list(active_web_users) + list(inactive_web_users):
             web_user.delete_domain_membership(self.name)
             web_user.save()
-
-    def _delete_sql_objects(self):
-        from casexml.apps.stock.models import DocDomainMapping
-        from corehq.apps.locations.models import SQLLocation, LocationType
-        from corehq.apps.products.models import SQLProduct
-
-        with connection.cursor() as cursor:
-
-            """
-                We use raw queries instead of ORM because Django queryset delete needs to
-                fetch objects into memory to send signals and handle cascades. It makes deletion very slow
-                if we have a millions of rows in stock data tables.
-            """
-            cursor.execute(
-                "DELETE FROM stock_stocktransaction "
-                "WHERE report_id IN (SELECT id FROM stock_stockreport WHERE domain=%s)", [self.name]
-            )
-
-            cursor.execute(
-                "DELETE FROM stock_stockreport WHERE domain=%s", [self.name]
-            )
-
-            cursor.execute(
-                "DELETE FROM commtrack_stockstate"
-                " WHERE product_id IN (SELECT product_id FROM products_sqlproduct WHERE domain=%s)", [self.name]
-            )
-
-        SQLProduct.objects.filter(domain=self.name).delete()
-        SQLLocation.objects.filter(domain=self.name).delete()
-        LocationType.objects.filter(domain=self.name).delete()
-        DocDomainMapping.objects.filter(domain_name=self.name).delete()
-
-        from corehq.apps.accounting.models import Subscription, Subscriber, SubscriptionAdjustment, Invoice, \
-            BillingRecord, LineItem, CreditAdjustment, CreditLine
-
-        SubscriptionAdjustment.objects.filter(subscription__subscriber__domain=self.name).delete()
-        BillingRecord.objects.filter(invoice__subscription__subscriber__domain=self.name).delete()
-        CreditAdjustment.objects.filter(invoice__subscription__subscriber__domain=self.name).delete()
-        CreditAdjustment.objects.filter(credit_line__subscription__subscriber__domain=self.name).delete()
-        CreditAdjustment.objects.filter(related_credit__subscription__subscriber__domain=self.name).delete()
-        LineItem.objects.filter(invoice__subscription__subscriber__domain=self.name).delete()
-
-        CreditLine.objects.filter(subscription__subscriber__domain=self.name).delete()
-        Invoice.objects.filter(subscription__subscriber__domain=self.name).delete()
-        Subscription.objects.filter(subscriber__domain=self.name).delete()
-        Subscriber.objects.filter(domain=self.name).delete()
 
     def all_media(self, from_apps=None):  # todo add documentation or refactor
         from corehq.apps.hqmedia.models import CommCareMultimedia

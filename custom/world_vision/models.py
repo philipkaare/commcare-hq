@@ -1,4 +1,5 @@
 from functools import partial
+from corehq.apps.change_feed import topics
 from dimagi.utils.dates import force_to_datetime
 import fluff
 from corehq.fluff.calculators.case import CasePropertyFilter
@@ -24,6 +25,7 @@ class WorldVisionMotherFluff(fluff.IndicatorDocument):
     domains = WORLD_VISION_DOMAINS
     group_by = ('domain', 'user_id')
     save_direct_to_sql = True
+    kafka_topic = topics.CASE
 
     name = flat_field(lambda case: case.name)
     lvl_4 = case_property('phc')
@@ -116,6 +118,7 @@ class WorldVisionHierarchyFluff(fluff.IndicatorDocument):
     domains = WORLD_VISION_DOMAINS
     group_by = ('domain',)
     save_direct_to_sql = True
+    kafka_topic = topics.META
 
     numerator = Numerator()
     lvl_4 = user_data('phc')
@@ -136,6 +139,7 @@ class WorldVisionChildFluff(fluff.IndicatorDocument):
     domains = WORLD_VISION_DOMAINS
     group_by = ('domain', 'user_id')
     save_direct_to_sql = True
+    kafka_topic = topics.CASE
 
     name = flat_field(lambda case: case.name)
     mother_id = flat_field(lambda case: case.indices[0]['referenced_id'])

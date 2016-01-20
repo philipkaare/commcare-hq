@@ -1,5 +1,6 @@
 from functools import partial
 
+from django.template import RequestContext
 from django.template.loader import render_to_string
 from django.core.urlresolvers import reverse
 from django import template
@@ -34,9 +35,12 @@ register = template.Library()
 
 @register.simple_tag
 def render_form_xml(form):
-    xml = form.get_xml() or ''
+    xml = form.get_xml()
+    if isinstance(xml, unicode):
+        xml.encode('utf-8', errors='replace')
+    formatted_xml = indent_xml(xml) if xml else ''
     return '<pre class="fancy-code prettyprint linenums"><code class="language-xml">%s</code></pre>' \
-           % escape(indent_xml(xml))
+           % escape(formatted_xml)
 
 
 
@@ -192,7 +196,7 @@ def render_form(form, domain, options):
                 'was_edited': True,
                 'latest_version': instance.orig_id,
             })
-        if getattr(instance, 'edited_on', None):
+        if getattr(instance, 'edited_on', None) and getattr(instance, 'deprecated_form_id', None):
             info.update({
                 'is_edit': True,
                 'edited_on': instance.edited_on,
@@ -221,4 +225,4 @@ def render_form(form, domain, options):
         "show_edit_options": show_edit_options,
         "show_edit_submission": show_edit_submission,
         "show_resave": show_resave,
-    })
+    }, RequestContext(request))

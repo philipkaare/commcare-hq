@@ -11,7 +11,7 @@ from django.contrib import messages
 from corehq.apps.app_manager.views.apps import get_apps_base_context
 
 from corehq.apps.app_manager.views.utils import back_to_main, bail
-from corehq import toggles, privileges
+from corehq import toggles, privileges, feature_previews
 from corehq.apps.accounting.utils import domain_has_privilege
 from corehq.apps.app_manager.const import (
     SCHEDULE_CURRENT_VISIT_NUMBER,
@@ -69,7 +69,7 @@ def form_designer(request, domain, app_id, module_id=None, form_id=None,
         return back_to_main(request, domain, app_id=app_id,
                             unique_form_id=form.unique_id)
 
-    vellum_plugins = ["modeliteration", "itemset"]
+    vellum_plugins = ["modeliteration", "itemset", "atwho"]
     if (toggles.COMMTRACK.enabled(domain)):
         vellum_plugins.append("commtrack")
     if toggles.VELLUM_SAVE_TO_CASE.enabled(domain):
@@ -79,6 +79,7 @@ def form_designer(request, domain, app_id, module_id=None, form_id=None,
 
     vellum_features = toggles.toggles_dict(username=request.user.username,
                                            domain=domain)
+    vellum_features.update(feature_previews.previews_dict(domain))
     vellum_features.update({
         'group_in_field_list': app.enable_group_in_field_list,
         'image_resize': app.enable_image_resize,
@@ -119,6 +120,7 @@ def form_designer(request, domain, app_id, module_id=None, form_id=None,
         'plugins': vellum_plugins,
         'app_callout_templates': next(app_callout_templates),
         'scheduler_data_nodes': scheduler_data_nodes,
+        'no_header': True,
     })
     return render(request, 'app_manager/form_designer.html', context)
 

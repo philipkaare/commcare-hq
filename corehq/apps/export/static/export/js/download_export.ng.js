@@ -13,6 +13,8 @@
 
     download_export.config(['$httpProvider', function($httpProvider) {
         $httpProvider.defaults.headers.common['X-Requested-With'] = 'XMLHttpRequest';
+        $httpProvider.defaults.xsrfCookieName = 'csrftoken';
+        $httpProvider.defaults.xsrfHeaderName = 'X-CSRFToken';
     }]);
     download_export.constant('formElement', {
         progress: function () { return null; },
@@ -100,6 +102,17 @@
 
         self._getGroups();
 
+        var exportType = $scope.exportList[0].export_type;
+        self.exportType = _(exportType).capitalize();
+
+        self.sendAnalytics = function () {
+            _.each($scope.formData.user_types, function (user_type) {
+                analytics.usage("Download Export", 'Select "user type"', user_type);
+            });
+            var action = ($scope.exportList.length > 1) ? "Bulk" : "Regular";
+            analytics.usage("Download Export", self.exportType, action);
+        };
+
         $scope.isFormInvalid = function () {
             if ($scope.formData.type_or_group === 'group') {
                 return _.isEmpty($scope.formData.group);
@@ -110,6 +123,7 @@
         $scope.prepareExport = function () {
             $scope.prepareExportError = null;
             $scope.preparingExport = true;
+            analytics.workflow("Clicked Prepare Export");
             djangoRMI.prepare_custom_export({
                 exports: $scope.exportList,
                 max_column_size: self._maxColumnSize,
@@ -117,9 +131,10 @@
             })
                 .success(function (data) {
                     if (data.success) {
+                        self.sendAnalytics();
                         $scope.preparingExport = false;
                         $scope.downloadInProgress = true;
-                        exportDownloadService.startDownload(data.download_id);
+                        exportDownloadService.startDownload(data.download_id, self.exportType);
                     } else {
                         self._handlePrepareError(data);
                     }
@@ -148,9 +163,10 @@
             })
                 .success(function (data) {
                     if (data.success) {
+                        self.sendAnalytics();
                         $scope.preparingMultimediaExport = false;
                         $scope.downloadInProgress = true;
-                        exportDownloadService.startMultimediaDownload(data.download_id);
+                        exportDownloadService.startMultimediaDownload(data.download_id, self.exportType);
                     } else {
                         self._handlePrepareError(data);
                     }
@@ -236,6 +252,11 @@
         }, function (status) {
             $scope.isMultimediaDownload = status;
         });
+
+        $scope.sendAnalytics = function () {
+            analytics.usage("Download Export", _(exportDownloadService.exportType).capitalize(), "Saved");
+            analytics.workflow("Clicked Download button");
+        };
     };
     download_export.controller(exportsControllers);
 
@@ -247,11 +268,13 @@
             self.downloadId = null;
             self._numErrors = 0;
             self._numCeleryRetries = 0;
+            self._lastProgress = 0;
             self.downloadStatusData = null;
             self.showDownloadStatus = false;
             self.downloadError = null;
             self.showCeleryError = false;
             self.isMultimediaDownload = false;
+            self.exportType = null;
         };
 
         self.resetDownload();
@@ -270,6 +293,14 @@
                         if (data.progress && data.progress.error) {
                             $interval.cancel(self._promise);
                             self.downloadError = data.progress.error;
+                            return;
+                        }
+                        if (data.progress.current > self._lastProgress) {
+                            self._lastProgress = data.progress.current;
+                            // processing is still going, keep moving.
+                            // this avoids failing hard prematurely at celery errors if
+                            // the polling is still reporting forward progress.
+                            self._numCeleryRetries = 0;
                             return;
                         }
                     }
@@ -305,15 +336,16 @@
             self._numErrors ++;
         };
 
-        self.startDownload = function (downloadId) {
+        self.startDownload = function (downloadId, exportType) {
             self.showDownloadStatus = true;
             self.downloadId = downloadId;
+            self.exportType = exportType;
             self._promise = $interval(self._checkDownloadProgress, 2000);
         };
 
-        self.startMultimediaDownload = function(downloadId) {
+        self.startMultimediaDownload = function(downloadId, exportType) {
             self.isMultimediaDownload = true;
-            self.startDownload(downloadId);
+            self.startDownload(downloadId, exportType);
         };
 
         return self;

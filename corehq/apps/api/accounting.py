@@ -110,7 +110,6 @@ class SoftwareProductRateResource(ModelResource):
 
 class SoftwarePlanVersionResource(ModelResource):
     plan = fields.IntegerField('plan_id', null=True)
-    product_rates = AccToManyField(FutureRateResource, 'product_rates', full=True, null=True)
     feature_rates = AccToManyField(FutureRateResource, 'feature_rates', full=True, null=True)
     role = fields.IntegerField('role_id', null=True)
 
@@ -118,6 +117,10 @@ class SoftwarePlanVersionResource(ModelResource):
         queryset = SoftwarePlanVersion.objects.all().order_by('pk')
         fields = ['id', 'date_created', 'is_active', 'last_modified']
         resource_name = 'software_plan_versions'
+
+    def dehydrate(self, bundle):
+        bundle.data['product_rates'] = [bundle.obj.product_rate.id]
+        return bundle
 
 
 class SubscriberResource(ModelResource):
@@ -130,12 +133,16 @@ class SubscriberResource(ModelResource):
 
 class BillingContactInfoResource(ModelResource):
     account = fields.IntegerField('account_id')
+    emails = fields.CharField(readonly=True)
 
     class Meta(AccountingResourceMeta):
         queryset = BillingContactInfo.objects.all().order_by('pk')
-        fields = ['id', 'first_name', 'last_name', 'emails', 'phone_number', 'company_name', 'first_line',
+        fields = ['id', 'first_name', 'last_name', 'phone_number', 'company_name', 'first_line',
                   'second_line', 'city', 'state_province_region', 'postal_code', 'country', 'last_modified']
         resource_name = 'billing_contact_info'
+
+    def dehydrate_emails(self, bundle):
+        return ','.join(bundle.obj.email_list)
 
 
 class BillingAccountResource(ModelResource):
@@ -149,7 +156,7 @@ class BillingAccountResource(ModelResource):
         queryset = BillingAccount.objects.all().order_by('pk')
         fields = ['id', 'name', 'salesforce_account_id', 'created_by', 'date_created', 'is_auto_invoiceable',
                   'account_type', 'created_by_domain', 'date_confirmed_extra_charges', 'is_active',
-                  'dimagi_contact', 'entry_point', 'last_modified']
+                  'dimagi_contact', 'entry_point', 'last_modified', 'last_payment_method', 'pre_or_post_pay']
         resource_name = 'billing_account'
 
 
@@ -162,7 +169,7 @@ class SubscriptionResource(ModelResource):
         queryset = Subscription.objects.all().order_by('pk')
         fields = ['id', 'salesforce_contract_id', 'date_start', 'date_end', 'date_delay_invoicing',
                   'date_created', 'is_active', 'do_not_invoice', 'auto_generate_credits', 'is_trial',
-                  'service_type', 'pro_bono_status', 'last_modified']
+                  'service_type', 'pro_bono_status', 'last_modified', 'funding_source']
         resource_name = 'subscription'
 
 
@@ -172,7 +179,7 @@ class InvoiceResource(ModelResource):
     applied_credit = fields.DecimalField('applied_credit')
 
     class Meta(AccountingResourceMeta):
-        queryset = Invoice.objects.all().order_by('pk')
+        queryset = Invoice.api_objects.all().order_by('pk')
         fields = ['id', 'tax_rate', 'balance', 'date_due', 'date_paid', 'date_created', 'date_received',
                   'date_start', 'date_end', 'is_hidden', 'is_hidden_to_ops', 'last_modified']
         resource_name = 'invoice'

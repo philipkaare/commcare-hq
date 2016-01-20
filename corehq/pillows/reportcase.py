@@ -3,7 +3,6 @@ from corehq.pillows.case import CasePillow
 from corehq.pillows.mappings.reportcase_mapping import REPORT_CASE_MAPPING, REPORT_CASE_INDEX
 from django.conf import settings
 from .base import convert_property_dict
-from pillowtop.checkpoints.manager import get_default_django_checkpoint_for_legacy_pillow_class
 
 
 class ReportCasePillow(CasePillow):
@@ -16,9 +15,10 @@ class ReportCasePillow(CasePillow):
     es_index = REPORT_CASE_INDEX
     default_mapping = REPORT_CASE_MAPPING
 
-    def __init__(self, create_index=True, online=True):
-        checkpoint = get_default_django_checkpoint_for_legacy_pillow_class(self.__class__)
-        super(ReportCasePillow, self).__init__(create_index=create_index, online=online, checkpoint=checkpoint)
+    @classmethod
+    def get_unique_id(self):
+        # NOTE: next time the index gets rebuilt this should be changed to return REPORT_CASE_INDEX
+        return '8c10a7564b6af5052f8b86693bf6ac07'
 
     def change_transform(self, doc_dict):
         if self.get_domain(doc_dict) not in getattr(settings, 'ES_CASE_FULL_INDEX_DOMAINS', []):

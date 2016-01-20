@@ -2,6 +2,8 @@ from copy import copy
 from datetime import datetime, timedelta, date
 import itertools
 import json
+from corehq.apps.users.permissions import FORM_EXPORT_PERMISSION, CASE_EXPORT_PERMISSION, \
+    DEID_EXPORT_PERMISSION
 import langcodes
 import os
 import pytz
@@ -33,6 +35,7 @@ from django.shortcuts import render
 from django.utils.decorators import method_decorator
 from django.utils.safestring import mark_safe
 from django.utils.translation import ugettext as _
+from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import (
     require_GET,
     require_http_methods,
@@ -80,14 +83,15 @@ from soil.tasks import prepare_download
 
 from corehq import privileges, toggles
 from corehq.apps.accounting.decorators import requires_privilege_json_response
-from corehq.apps.app_manager.const import USERCASE_TYPE
+from corehq.apps.app_manager.const import USERCASE_TYPE, USERCASE_ID
 from corehq.apps.app_manager.models import Application
+from corehq.apps.app_manager.util import actions_use_usercase
 from corehq.apps.cloudcare.touchforms_api import get_user_contributions_to_touchforms_session
 from corehq.apps.data_interfaces.dispatcher import DataInterfaceDispatcher
 from corehq.apps.domain.decorators import (
     login_and_domain_required,
     login_or_digest,
-    login_or_digest_or_basic,
+    login_or_digest_or_basic_or_apikey,
 )
 from corehq.apps.domain.models import Domain
 from corehq.apps.export.custom_export_helpers import make_custom_export_helper
@@ -97,9 +101,11 @@ from corehq.apps.hqcase.dbaccessors import get_case_ids_in_domain
 from corehq.apps.hqcase.export import export_cases
 from corehq.apps.hqcase.utils import submit_case_blocks
 from corehq.apps.hqwebapp.models import ReportsTab
+from corehq.apps.hqwebapp.utils import csrf_inline
 from corehq.apps.locations.permissions import can_edit_form_location
 from corehq.apps.products.models import SQLProduct
 from corehq.apps.receiverwrapper import submit_form_locally
+from corehq.apps.sofabed.models import CaseData
 from corehq.apps.userreports.util import default_language as ucr_default_language
 from corehq.apps.users.decorators import require_permission
 from corehq.apps.users.export import export_users
@@ -131,7 +137,7 @@ from .models import (
 )
 
 from .standard import inspect, export, ProjectReport
-from corehq.apps.style.decorators import use_knockout_js, use_bootstrap3
+from corehq.apps.style.decorators import use_bootstrap3
 from .standard.cases.basic import CaseListReport
 from .tasks import (
     build_form_multimedia_zip,
@@ -156,8 +162,10 @@ datespan_default = datespan_in_request(
     default_days=7,
 )
 
-require_form_export_permission = require_permission(Permissions.view_report, 'corehq.apps.reports.standard.export.ExcelExportReport', login_decorator=None)
-require_case_export_permission = require_permission(Permissions.view_report, 'corehq.apps.reports.standard.export.CaseExportReport', login_decorator=None)
+require_form_export_permission = require_permission(
+    Permissions.view_report, FORM_EXPORT_PERMISSION, login_decorator=None)
+require_case_export_permission = require_permission(
+    Permissions.view_report, CASE_EXPORT_PERMISSION, login_decorator=None)
 
 require_form_view_permission = require_permission(Permissions.view_report, 'corehq.apps.reports.standard.inspect.SubmitHistory', login_decorator=None)
 require_case_view_permission = require_permission(Permissions.view_report, 'corehq.apps.reports.standard.cases.basic.CaseListReport', login_decorator=None)
@@ -289,10 +297,7 @@ def export_data(req, domain):
         return resp
     else:
         messages.error(req, "Sorry, there was no data found for the tag '%s'." % export_tag)
-        next = req.GET.get("next", "")
-        if not next:
-            next = export.ExcelExportReport.get_url(domain=domain)
-        return HttpResponseRedirect(next)
+        raise Http404()
 
 
 @require_form_export_permission
@@ -351,7 +356,7 @@ def export_default_or_custom_data(request, domain, export_id=None, bulk_export=F
         return _export_no_deid(request, domain, export_id, bulk_export=bulk_export)
 
 
-@require_permission('view_report', 'corehq.apps.reports.standard.export.DeidExportReport', login_decorator=None)
+@require_permission('view_report', DEID_EXPORT_PERMISSION, login_decorator=None)
 def _export_deid(request, domain, export_id=None, bulk_export=False):
     return _export_default_or_custom_data(request, domain, export_id, bulk_export=bulk_export, safe_only=True)
 
@@ -364,7 +369,6 @@ def _export_no_deid(request, domain, export_id=None, bulk_export=False):
 def _export_default_or_custom_data(request, domain, export_id=None, bulk_export=False, safe_only=False):
     req = request.POST if request.method == 'POST' else request.GET
     async = req.get('async') == 'true'
-    next = req.get("next", "")
     format = req.get("format", "")
     export_type = req.get("type", "form")
     previous_export_id = req.get("previous_export", None)
@@ -423,7 +427,6 @@ def _export_default_or_custom_data(request, domain, export_id=None, bulk_export=
 
         export_object = export_class(index=export_tag)
 
-
     if export_type == 'form':
         _filter = filter
         filter = SerializableFunction(default_form_filter, filter=_filter)
@@ -441,8 +444,6 @@ def _export_default_or_custom_data(request, domain, export_id=None, bulk_export=
             max_column_size=max_column_size,
         )
     else:
-        if not next:
-            next = export.ExcelExportReport.get_url(domain=domain)
         try:
             resp = export_object.download_data(format, filter=filter, limit=limit)
         except SchemaMismatchException, e:
@@ -452,15 +453,16 @@ def _export_default_or_custom_data(request, domain, export_id=None, bulk_export=
                 "Sorry, the export failed for %s, please try again later" \
                     % export_object.name
             )
-            return HttpResponseRedirect(next)
+            raise Http404()
         if resp:
             return resp
         else:
             messages.error(request, "Sorry, there was no data found for the tag '%s'." % export_object.name)
-            return HttpResponseRedirect(next)
+            raise Http404()
 
 
-@login_or_digest_or_basic(default='digest')
+@csrf_exempt
+@login_or_digest_or_basic_or_apikey(default='digest')
 @require_form_export_permission
 @require_GET
 def hq_download_saved_export(req, domain, export_id):
@@ -817,7 +819,7 @@ def edit_scheduled_report(request, domain, scheduled_report_id=None,
             instance.day = calculate_day(instance.interval, instance.day, day_change)
 
         if instance.owner_id != user_id or instance.domain != domain:
-            raise HttpResponseBadRequest()
+            return HttpResponseBadRequest()
     else:
         instance = ReportNotification(
             owner_id=user_id,
@@ -1052,7 +1054,7 @@ def case_forms(request, domain, case_id):
         start_range = int(request.GET['start_range'])
         end_range = int(request.GET['end_range'])
     except (KeyError, ValueError):
-        raise HttpResponseBadRequest()
+        return HttpResponseBadRequest()
 
     def form_to_json(form):
         return {
@@ -1096,7 +1098,7 @@ def case_xml(request, domain, case_id):
 @require_POST
 def rebuild_case_view(request, domain, case_id):
     case = get_document_or_404(CommCareCase, domain, case_id)
-    rebuild_case_from_forms(domain, case_id, UserRequestedRebuild(user_id=request.user.user_id))
+    rebuild_case_from_forms(domain, case_id, UserRequestedRebuild(user_id=request.couch_user.user_id))
     messages.success(request, _(u'Case %s was rebuilt from its forms.' % case.name))
     return HttpResponseRedirect(reverse('case_details', args=[domain, case_id]))
 
@@ -1152,11 +1154,13 @@ def close_case_view(request, domain, case_id):
             You can also reopen the case in the future by archiving the last form in the case history.
             <form id="{html_form_id}" action="{url}" method="POST">
                 <input type="hidden" name="closing_form" value="{xform_id}" />
+                {csrf_inline}
             </form>
         '''.format(
             name=case.name,
             html_form_id='undo-close-case',
             xform_id=form_id,
+            csrf_inline=csrf_inline(request),
             url=reverse('undo_close_case', args=[domain, case_id]),
         ))
         messages.success(request, mark_safe(msg), extra_tags='html')
@@ -1410,46 +1414,67 @@ def download_form(request, domain, instance_id):
     return response
 
 
-def _form_instance_to_context_url(domain, instance):
-    try:
-        build = Application.get(instance.build_id)
-    except ResourceNotFound:
-        raise Http404(_('Application not found.'))
-
-    form = build.get_form_by_xmlns(instance.xmlns)
-    if not form:
-        raise Http404(_('Missing module or form information!'))
-
-    return reverse(
-        'cloudcare_form_context',
-        args=[domain, instance.build_id, form.get_module().id, form.id],
-        params={'instance_id': instance._id}
-    )
-
-
 class EditFormInstance(View):
 
     @use_bootstrap3
-    @use_knockout_js
     @method_decorator(require_form_view_permission)
     @method_decorator(require_permission(Permissions.edit_data))
     def dispatch(self, request, *args, **kwargs):
         return super(EditFormInstance, self).dispatch(request, args, kwargs)
 
+    @staticmethod
+    def _get_form_from_instance(instance):
+        try:
+            build = Application.get(instance.build_id)
+        except ResourceNotFound:
+            raise Http404(_('Application not found.'))
+
+        form = build.get_form_by_xmlns(instance.xmlns)
+        if not form:
+            raise Http404(_('Missing module or form information!'))
+        return form
+
+    @staticmethod
+    def _form_instance_to_context_url(domain, instance):
+        form = EditFormInstance._get_form_from_instance(instance)
+        return reverse(
+            'cloudcare_form_context',
+            args=[domain, instance.build_id, form.get_module().id, form.id],
+            params={'instance_id': instance._id}
+        )
+
+    @staticmethod
+    def _form_uses_usercase(form):
+        actions = form.active_actions()
+        return form.form_type == 'module_form' and actions_use_usercase(actions)
+
     def get(self, request, *args, **kwargs):
         domain = request.domain
         instance_id = self.kwargs.get('instance_id', None)
+
+        def _error(msg):
+            messages.error(request, msg)
+            url = reverse('render_form_data', args=[domain, instance_id])
+            return HttpResponseRedirect(url)
+
         if not (has_privilege(request, privileges.DATA_CLEANUP)) or not instance_id:
             raise Http404()
 
         instance = _get_form_to_edit(domain, request.couch_user, instance_id)
         context = _get_form_context(request, domain, instance)
         if not instance.app_id or not instance.build_id:
-            messages.error(request, _('Could not detect the application/form for this submission.'))
-            return HttpResponseRedirect(reverse('render_form_data', args=[domain, instance_id]))
+            return _error(_('Could not detect the application/form for this submission.'))
 
         user = get_document_or_404(CommCareUser, domain, instance.metadata.userID)
         edit_session_data = get_user_contributions_to_touchforms_session(user)
+
+        # add usercase to session
+        if self._form_uses_usercase(self._get_form_from_instance(instance)):
+            try:
+                usercase_id = CaseData.objects.get(user_id=user._id, type=USERCASE_TYPE).case_id
+            except CaseData.DoesNotExist:
+                return _error(_('Could not find the user-case for this form'))
+            edit_session_data[USERCASE_ID] = usercase_id
 
         case_blocks = extract_case_blocks(instance, include_path=True)
         # a bit hacky - the app manager puts the main case directly in the form, so it won't have
@@ -1474,7 +1499,7 @@ class EditFormInstance(View):
             'maps_api_key': settings.GMAPS_API_KEY,  # used by cloudcare
             'form_name': _('Edit Submission'),  # used in breadcrumbs
             'edit_context': {
-                'formUrl': _form_instance_to_context_url(domain, instance),
+                'formUrl': self._form_instance_to_context_url(domain, instance),
                 'submitUrl': reverse('receiver_secure_post_with_app_id', args=[domain, instance.build_id]),
                 'sessionData': edit_session_data,
                 'returnUrl': reverse('render_form_data', args=[domain, instance_id]),
@@ -1538,11 +1563,13 @@ def archive_form(request, domain, instance_id):
         "notif": notif_msg,
         "undo": _("Undo"),
         "url": reverse('unarchive_form', args=[domain, instance_id]),
-        "id": "restore-%s" % instance_id
+        "id": "restore-%s" % instance_id,
+        "csrf_inline": csrf_inline(request)
     }
+
     msg_template = u"""{notif} <a href="javascript:document.getElementById('{id}').submit();">{undo}</a>
-        <form id="{id}" action="{url}" method="POST"></form>""" if instance.doc_type == "XFormArchived" \
-        else u'{notif}'
+        <form id="{id}" action="{url}" method="POST">{csrf_inline}</form>""" \
+        if instance.doc_type == "XFormArchived" else u'{notif}'
     msg = msg_template.format(**params)
     messages.success(request, mark_safe(msg), extra_tags='html')
 

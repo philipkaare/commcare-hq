@@ -1,3 +1,4 @@
+import os
 from django.conf import settings
 
 
@@ -6,7 +7,7 @@ Before you can merge you must run the {slug} doc_type migration.
 
 If you're seeing this on your **dev machine**, run
 
-./manage.py sync_couchdb
+./manage.py sync_couch_views
 ./manage.py run_doctype_migration {slug} --initial
 ./manage.py migrate
 
@@ -37,6 +38,7 @@ class MigrationNotComplete(Exception):
 
 def assert_initial_complete(migrator):
     def forwards(apps, schema_editor):
-        if not migrator.last_seq and not settings.UNIT_TESTING and not getattr(settings, 'IS_TRAVIS', False):
+        is_fresh_install = os.environ.get('CCHQ_IS_FRESH_INSTALL') == '1'
+        if not migrator.last_seq and not settings.UNIT_TESTING and not is_fresh_install:
             raise MigrationNotComplete(MIGRATION_MESSAGE.format(slug=migrator.slug))
     return forwards

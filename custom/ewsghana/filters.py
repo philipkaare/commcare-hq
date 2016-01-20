@@ -143,6 +143,7 @@ class EWSLocationFilter(EWSRestrictionLocationFilter):
 
     @property
     def filter_context(self):
+        from custom.ewsghana import ROOT_SITE_CODE
         api_root = reverse('api_dispatch_list',
                            params={'show_administrative': False},
                            kwargs={'domain': self.domain,
@@ -153,10 +154,10 @@ class EWSLocationFilter(EWSRestrictionLocationFilter):
         if not loc_id:
             domain_membership = user.get_domain_membership(self.domain)
             if not domain_membership or not domain_membership.location_id:
-                loc_id = SQLLocation.objects.filter(
+                loc_id = SQLLocation.objects.get(
                     domain=self.domain,
-                    location_type__name='country'
-                ).first().location_id
+                    site_code=ROOT_SITE_CODE
+                ).location_id
             else:
                 loc_id = domain_membership.location_id
 
@@ -216,15 +217,16 @@ class EWSDateFilter(BaseReportFilter):
                     ews_date_format(fridays[idx + 1] - relativedelta(days=1))
                 )
             except IndexError:
-                value = '{0}|{1}'.format(val.strftime("%Y-%m-%d"), now.strftime("%Y-%m-%d"))
-                text = '{0} - {1}'.format(ews_date_format(val), ews_date_format(now))
+                next_thursday = val + relativedelta(days=6)
+                value = '{0}|{1}'.format(val.strftime("%Y-%m-%d"), next_thursday.strftime("%Y-%m-%d"))
+                text = '{0} - {1}'.format(ews_date_format(val), ews_date_format(next_thursday))
             finally:
                 weeks.append(dict(val=value, text=text))
         return [
             {
                 'text': 'Week (Friday - Thursday)',
                 'val': 2,
-                'firstOptions': weeks[:-1],
+                'firstOptions': weeks,
                 'secondOptions': []
             },
             {

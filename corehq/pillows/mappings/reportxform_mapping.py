@@ -1,5 +1,6 @@
 from corehq.pillows.core import DATE_FORMATS_STRING, DATE_FORMATS_ARR
-REPORT_XFORM_INDEX = "report_xforms_20150406_1136"
+from corehq.util.elastic import es_index
+REPORT_XFORM_INDEX = es_index("report_xforms_20150406_1136")
 
 CASE_MAPPING_FRAGMENT = {
     'type': 'nested',
@@ -65,7 +66,6 @@ CASE_MAPPING_FRAGMENT = {
 REPORT_XFORM_MAPPING = {
     "date_detection": False,
     "date_formats": DATE_FORMATS_ARR, #for parsing the explicitly defined dates
-    'ignore_malformed': True,
     'dynamic': True,
     "_meta": {
         "created": '2014-10-07', #record keeping on the index.

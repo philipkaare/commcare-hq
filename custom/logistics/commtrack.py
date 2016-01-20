@@ -139,6 +139,7 @@ def bootstrap_domain(api_object, **kwargs):
         save_checkpoint(checkpoint, 'product', 100, 0, checkpoint.start_date, False)
         checkpoint.start_date = None
         checkpoint.save()
-        api_object.balance_migration(date)
+        from custom.ilsgateway.tasks import balance_migration_task
+        balance_migration_task.delay(api_object.domain, api_object.endpoint)
     except ConnectionError as e:
         logging.error(e)

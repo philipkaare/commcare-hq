@@ -5,11 +5,11 @@ from django.http import Http404
 import collections
 from django import forms
 from django.utils.translation import ugettext as _
-from corehq.apps.app_manager.dbaccessors import get_apps_in_domain, get_app, \
-    get_exports_by_application
+from corehq.apps.app_manager.analytics import get_exports_by_application
+from corehq.apps.app_manager.dbaccessors import get_apps_in_domain, get_app
 from corehq.apps.app_manager.models import Application
 from corehq.apps.hqcase.dbaccessors import get_case_types_for_domain
-from couchforms.dbaccessors import get_exports_by_form
+from couchforms.analytics import get_exports_by_form
 from couchforms.models import XFormInstance
 from dimagi.utils.decorators.memoized import memoized
 
@@ -44,11 +44,11 @@ class ApplicationDataSourceUIHelper(object):
     - Add the following knockout bindings to your template:
 
         $(function () {
-            ko.applyBindings({
+            $("#FORM").koApplyBindings({
                 application: ko.observable(""),
                 sourceType: ko.observable(""),
                 sourcesMap: {{ sources_map|JSON }}
-            }, $("#FORM").get(0));
+            });
         });
 
     Where FORM is a selector for your form and sources_map is the .all_sources property from this object
@@ -125,7 +125,7 @@ class ApplicationDataSourceUIHelper(object):
 
 
 def get_app_sources(domain):
-    apps = get_apps_in_domain(domain, full=True, include_remote=False)
+    apps = get_apps_in_domain(domain, include_remote=False)
     return {
         app._id: {
             "name": app.name,

@@ -1,5 +1,6 @@
 from collections import namedtuple
 from urllib import urlencode
+from corehq.apps.users.permissions import FORM_EXPORT_PERMISSION
 from corehq.toggles import OPENLMIS
 
 from django.utils.safestring import mark_safe, mark_for_escaping
@@ -17,7 +18,7 @@ from corehq.apps.accounting.utils import (
     domain_has_privilege,
     is_accounting_admin
 )
-from corehq.apps.app_manager.dbaccessors import domain_has_apps
+from corehq.apps.app_manager.dbaccessors import domain_has_apps, get_brief_apps_in_domain
 from corehq.apps.domain.utils import user_has_custom_top_menu
 from corehq.apps.hqadmin.reports import (
     RealProjectSpacesReport,
@@ -34,6 +35,8 @@ from corehq.apps.indicators.utils import get_indicator_domains
 from corehq.apps.locations.analytics import users_have_locations
 from corehq.apps.smsbillables.dispatcher import SMSAdminInterfaceDispatcher
 from corehq.apps.userreports.util import has_report_builder_access
+from corehq.apps.users.decorators import get_permission_name
+from corehq.apps.users.models import Permissions
 from django_prbac.utils import has_privilege
 from corehq.util.markup import mark_up_urls
 
@@ -594,6 +597,18 @@ class ProjectDataTab(UITab):
 
     @property
     @memoized
+    def can_only_see_deid_exports(self):
+        from corehq.apps.export.views import user_can_view_deid_exports
+        return (not self.couch_user.can_view_reports()
+                and not self.couch_user.has_permission(
+                    self.domain,
+                    get_permission_name(Permissions.view_report),
+                    data=FORM_EXPORT_PERMISSION
+                )
+                and user_can_view_deid_exports(self.domain, self.couch_user))
+
+    @property
+    @memoized
     def can_use_lookup_tables(self):
         return domain_has_privilege(self.domain, privileges.LOOKUP_TABLES)
 
@@ -611,7 +626,20 @@ class ProjectDataTab(UITab):
         }
 
         export_data_views = []
-        if self.can_edit_commcare_data:
+        if self.can_only_see_deid_exports:
+            from corehq.apps.export.views import DeIdFormExportListView, DownloadFormExportView
+            export_data_views.append({
+                'title': DeIdFormExportListView.page_title,
+                'url': reverse(DeIdFormExportListView.urlname,
+                               args=(self.domain,)),
+                'subpages': [
+                    {
+                        'title': DownloadFormExportView.page_title,
+                        'urlname': DownloadFormExportView.urlname,
+                    },
+                ]
+            })
+        elif self.can_export_data:
             from corehq.apps.export.views import (
                 FormExportListView,
                 CaseExportListView,
@@ -630,11 +658,11 @@ class ProjectDataTab(UITab):
                                    args=(self.domain,)),
                     'show_in_dropdown': True,
                     'icon': 'icon icon-list-alt fa fa-list-alt',
-                    'subpages': [
+                    'subpages': filter(None, [
                         {
                             'title': CreateCustomFormExportView.page_title,
                             'urlname': CreateCustomFormExportView.urlname,
-                        },
+                        } if self.can_edit_commcare_data else None,
                         {
                             'title': BulkDownloadFormExportView.page_title,
                             'urlname': BulkDownloadFormExportView.urlname,
@@ -646,8 +674,8 @@ class ProjectDataTab(UITab):
                         {
                             'title': EditCustomFormExportView.page_title,
                             'urlname': EditCustomFormExportView.urlname,
-                        },
-                    ]
+                        } if self.can_edit_commcare_data else None,
+                    ])
                 },
                 {
                     'title': CaseExportListView.page_title,
@@ -655,11 +683,11 @@ class ProjectDataTab(UITab):
                                    args=(self.domain,)),
                     'show_in_dropdown': True,
                     'icon': 'icon icon-share fa fa-share-square-o',
-                    'subpages': [
+                    'subpages': filter(None, [
                         {
                             'title': CreateCustomCaseExportView.page_title,
                             'urlname': CreateCustomCaseExportView.urlname,
-                        },
+                        } if self.can_edit_commcare_data else None,
                         {
                             'title': DownloadCaseExportView.page_title,
                             'urlname': DownloadCaseExportView.urlname,
@@ -667,24 +695,11 @@ class ProjectDataTab(UITab):
                         {
                             'title': EditCustomCaseExportView.page_title,
                             'urlname': EditCustomCaseExportView.urlname,
-                        },
-                    ]
+                        } if self.can_edit_commcare_data else None,
+                    ])
                 },
             ])
-        from corehq.apps.export.views import DeIdFormExportListView
-        if DeIdFormExportListView.has_deid_permissions(self._request, self.domain):
-            from corehq.apps.export.views import DownloadFormExportView
-            export_data_views.append({
-                'title': DeIdFormExportListView.page_title,
-                'url': reverse(DeIdFormExportListView.urlname,
-                               args=(self.domain,)),
-                'subpages': [
-                    {
-                        'title': DownloadFormExportView.page_title,
-                        'urlname': DownloadFormExportView.urlname,
-                    },
-                ]
-            })
+
         if export_data_views:
             items.append([_("Export Data"), export_data_views])
 
@@ -696,7 +711,7 @@ class ProjectDataTab(UITab):
             from corehq.apps.data_interfaces.views \
                 import ArchiveFormView, AutomaticUpdateRuleListView
 
-            if self.can_use_data_cleanup and toggles.AUTOMATIC_CASE_CLOSURE.enabled(self.domain):
+            if self.can_use_data_cleanup:
                 edit_section[0][1].append({
                     'title': AutomaticUpdateRuleListView.page_title,
                     'url': reverse(AutomaticUpdateRuleListView.urlname, args=[self.domain]),
@@ -717,7 +732,7 @@ class ProjectDataTab(UITab):
 
     @property
     def dropdown_items(self):
-        if not self.can_edit_commcare_data:
+        if self.can_only_see_deid_exports or not self.can_export_data:
             return []
         from corehq.apps.export.views import (
             FormExportListView,
@@ -755,12 +770,7 @@ class ApplicationsTab(UITab):
     def dropdown_items(self):
         # todo async refresh submenu when on the applications page and
         # you change the application name
-        from corehq.apps.app_manager.models import Application
-        key = [self.domain]
-        apps = Application.get_db().view('app_manager/applications_brief',
-                             reduce=False,
-                             startkey=key,
-                             endkey=key + [{}],).all()
+        apps = get_brief_apps_in_domain(self.domain)
         submenu_context = []
         if not apps:
             return submenu_context
@@ -768,21 +778,15 @@ class ApplicationsTab(UITab):
         submenu_context.append(dropdown_dict(_('My Applications'),
                                is_header=True))
         for app in apps:
-            app_info = app['value']
-            if app_info:
-                app_id = app_info['_id']
-                app_name = app_info['name']
-                app_doc_type = app_info['doc_type']
+            url = reverse('view_app', args=[self.domain, app.get_id]) if self.couch_user.can_edit_apps() \
+                else reverse('release_manager', args=[self.domain, app.get_id])
+            app_title = self.make_app_title(app.name, app.doc_type)
 
-                url = reverse('view_app', args=[self.domain, app_id]) if self.couch_user.can_edit_apps() \
-                    else reverse('release_manager', args=[self.domain, app_id])
-                app_title = self.make_app_title(app_name, app_doc_type)
-
-                submenu_context.append(dropdown_dict(
-                    app_title,
-                    url=url,
-                    data_id=app_id,
-                ))
+            submenu_context.append(dropdown_dict(
+                app_title,
+                url=url,
+                data_id=app.get_id,
+            ))
 
         if self.couch_user.can_edit_apps():
             submenu_context.append(dropdown_dict(None, is_divider=True))
@@ -819,7 +823,7 @@ class CloudcareTab(UITab):
 
 class MessagingTab(UITab):
     title = ugettext_noop("Messaging")
-    view = "corehq.apps.sms.views.compose_message"
+    view = "corehq.apps.sms.views.default"
 
     @property
     def is_viewable(self):
@@ -1525,6 +1529,8 @@ class AdminReportsTab(UITab):
             (_('Administrative Reports'), [
                 {'title': _('Project Space List'),
                  'url': reverse('admin_report_dispatcher', args=('domains',))},
+                {'title': _('Submission Map'),
+                 'url': reverse('dimagisphere')},
                 {'title': _('User List'),
                  'url': reverse('admin_report_dispatcher', args=('user_list',))},
                 {'title': _('Application List'),
@@ -1661,6 +1667,7 @@ class AdminTab(UITab):
             dropdown_dict(_("Reports"), is_header=True),
             dropdown_dict(_("Admin Reports"), url=reverse("default_admin_report")),
             dropdown_dict(_("System Info"), url=reverse("system_info")),
+            dropdown_dict(_("Submission Map"), url=reverse("dimagisphere")),
             dropdown_dict(_("Management"), is_header=True),
             dropdown_dict(mark_for_escaping(_("Commands")),
                           url=reverse("management_commands")),
@@ -1683,6 +1690,7 @@ class AdminTab(UITab):
         submenu_context.extend([
             dropdown_dict(_("SMS Connectivity & Billing"), url=reverse("default_sms_admin_interface")),
             dropdown_dict(_("Feature Flags"), url=reverse("toggle_list")),
+            dropdown_dict(_("CommCare Builds"), url="/builds/edit_menu"),
             dropdown_dict(None, is_divider=True),
             dropdown_dict(_("Django Admin"), url="/admin")
         ])
@@ -1732,3 +1740,5 @@ class MaintenanceAlert(models.Model):
     @property
     def html(self):
         return mark_up_urls(self.text)
+
+from .signals import *

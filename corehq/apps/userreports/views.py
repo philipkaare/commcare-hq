@@ -4,6 +4,7 @@ import functools
 import json
 import os
 import tempfile
+from django.conf import settings
 
 from django.contrib import messages
 from django.core.exceptions import ValidationError
@@ -18,7 +19,7 @@ from django.views.generic import View
 from corehq.apps.analytics.tasks import track_workflow
 from djangular.views.mixins import JSONResponseMixin, allow_remote_invocation
 
-from corehq.apps.app_manager.dbaccessors import get_apps_in_domain
+from corehq.apps.app_manager.dbaccessors import domain_has_apps
 from corehq.apps.app_manager.models import Application, Form
 
 from sqlalchemy import types, exc
@@ -31,12 +32,11 @@ from corehq import toggles
 from corehq.apps.domain.decorators import login_and_domain_required, login_or_basic
 from corehq.apps.style.decorators import (
     use_bootstrap3,
-    use_knockout_js,
     use_select2,
     use_daterangepicker,
     use_datatables,
     use_jquery_ui,
-)
+    use_angular_js)
 from corehq.apps.userreports.app_manager import get_case_data_source, get_form_data_source
 from corehq.apps.userreports.exceptions import (
     BadBuilderConfigError,
@@ -64,7 +64,7 @@ from corehq.apps.userreports.models import (
 from corehq.apps.userreports.reports.filters.choice_providers import ChoiceQueryContext
 from corehq.apps.userreports.reports.view import ConfigurableReport
 from corehq.apps.userreports.sql import IndicatorSqlAdapter
-from corehq.apps.userreports.tasks import rebuild_indicators
+from corehq.apps.userreports.tasks import rebuild_indicators, resume_building_indicators
 from corehq.apps.userreports.ui.forms import (
     ConfigurableReportEditForm,
     ConfigurableDataSourceEditForm,
@@ -104,6 +104,8 @@ def swallow_programming_errors(fn):
         try:
             return fn(request, domain, *args, **kwargs)
         except ProgrammingError as e:
+            if settings.DEBUG:
+                raise
             messages.error(
                 request,
                 _('There was a problem processing your request. '
@@ -138,7 +140,6 @@ class ReportBuilderView(BaseDomainView):
 
     @cls_to_view_login_and_domain
     @use_bootstrap3
-    @use_knockout_js
     @use_select2
     @use_daterangepicker
     @use_datatables
@@ -162,6 +163,10 @@ class ReportBuilderTypeSelect(JSONResponseMixin, ReportBuilderView):
     urlname = 'report_builder_select_type'
     page_title = ugettext_lazy('Select Report Type')
 
+    @use_angular_js
+    def dispatch(self, request, *args, **kwargs):
+        return super(ReportBuilderTypeSelect, self).dispatch(request, *args, **kwargs)
+
     @property
     def page_url(self):
         return "#"
@@ -169,7 +174,7 @@ class ReportBuilderTypeSelect(JSONResponseMixin, ReportBuilderView):
     @property
     def page_context(self):
         return {
-            "has_apps": len(get_apps_in_domain(self.domain)) > 0,
+            "has_apps": domain_has_apps(self.domain),
             "report": {
                 "title": _("Create New Report")
             },
@@ -454,7 +459,7 @@ def delete_report(request, domain, report_id):
     if data_source.get_report_count() <= 1:
         # No other reports reference this data source.
         try:
-            delete_data_source_shared(domain, data_source._id, request)
+            data_source.deactivate()
         except Http404:
             # It's possible the data source has already been deleted, but
             # that's fine with us.
@@ -556,6 +561,13 @@ def _edit_data_source_shared(request, domain, config, read_only=False):
         'data_source': config,
         'read_only': read_only
     })
+    if config.is_deactivated:
+        messages.info(
+            request, _(
+                'Data source "{}" has no associated table.\n'
+                'Click "Rebuild Data Source" to recreate the table.'
+            ).format(config.display_name)
+        )
     return render(request, "userreports/edit_data_source.html", context)
 
 
@@ -582,6 +594,10 @@ def delete_data_source_shared(domain, config_id, request=None):
 @require_POST
 def rebuild_data_source(request, domain, config_id):
     config, is_static = get_datasource_config_or_404(config_id, domain)
+    if config.is_deactivated:
+        config.is_deactivated = False
+        config.save()
+
     messages.success(
         request,
         _('Table "{}" is now being rebuilt. Data should start showing up soon').format(
@@ -590,6 +606,26 @@ def rebuild_data_source(request, domain, config_id):
     )
 
     rebuild_indicators.delay(config_id)
+    return HttpResponseRedirect(reverse('edit_configurable_data_source', args=[domain, config._id]))
+
+
+@toggles.USER_CONFIGURABLE_REPORTS.required_decorator()
+@require_POST
+def resume_building_data_source(request, domain, config_id):
+    config, is_static = get_datasource_config_or_404(config_id, domain)
+    if not is_static and config.meta.build.finished:
+        messages.warning(
+            request,
+            _('Table "{}" has already finished building. Rebuild table to start over.').format(
+                config.display_name
+            )
+        )
+    else:
+        messages.success(
+            request,
+            _('Resuming rebuilding table "{}".').format(config.display_name)
+        )
+        resume_building_indicators.delay(config_id)
     return HttpResponseRedirect(reverse('edit_configurable_data_source', args=[domain, config._id]))
 
 
@@ -696,6 +732,20 @@ def export_data_source(request, domain, config_id):
     for sql_filter in params.sql_filters:
         q = q.filter(sql_filter)
 
+    # xls format has limit of 65536 rows
+    # First row is taken up by headers
+    if params.format == Format.XLS and q.count() >= 65535:
+        keyword_params = dict(**request.GET)
+        # use default format
+        if 'format' in keyword_params:
+            del keyword_params['format']
+        return HttpResponseRedirect(
+            '%s?%s' % (
+                reverse('export_configurable_data_source', args=[domain, config._id]),
+                urlencode(keyword_params)
+            )
+        )
+
     # build export
     def get_table(q):
         yield table.columns.keys()
@@ -729,15 +779,13 @@ def choice_list_api(request, domain, report_id, filter_id):
 
     if hasattr(report_filter, 'choice_provider'):
         query_context = ChoiceQueryContext(
-            report=report,
-            report_filter=report_filter,
             query=request.GET.get('q', None),
             limit=int(request.GET.get('limit', 20)),
             page=int(request.GET.get('page', 1)) - 1
         )
         return json_response([
             choice._asdict() for choice in
-            report_filter.choice_provider(query_context)
+            report_filter.choice_provider.query(query_context)
         ])
     else:
         # mobile UCR hits this API for invalid filters. Just return no choices.

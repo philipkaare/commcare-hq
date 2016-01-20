@@ -9,9 +9,18 @@ import os
 
 LOCAL_APPS = (
     'django_extensions',
+    # for tests
+    'testapps.test_elasticsearch',
+    'testapps.test_pillowtop',
 )
 
 TEST_RUNNER = 'testrunner.DevTestRunner'
+
+SKIP_TESTS_REQUIRING_EXTRA_SETUP = True
+
+# https://docs.djangoproject.com/en/1.8/ref/settings/#std:setting-TEST_NON_SERIALIZED_APPS
+# https://docs.djangoproject.com/en/1.8/ref/settings/#serialize
+TEST_NON_SERIALIZED_APPS = ['corehq.form_processor']
 
 ####### Django Extensions #######
 # These things will be imported when you run ./manage.py shell_plus
@@ -56,3 +65,15 @@ CELERY_EAGER_PROPAGATES_EXCEPTIONS = True
 
 # default inactivity timeout to 1 year
 INACTIVITY_TIMEOUT = 60 * 24 * 365
+
+CACHE_REPORTS = False
+
+# Fail hard on csrf failures during dev
+CSRF_SOFT_MODE = False
+
+# Make a dir to use for storing attachments as blobs on the filesystem
+shared_dirname = os.path.join(os.path.dirname(os.path.realpath(__file__)),
+                              'sharedfiles')
+if not os.path.exists(shared_dirname):
+    os.mkdir(shared_dirname)
+SHARED_DRIVE_ROOT = shared_dirname

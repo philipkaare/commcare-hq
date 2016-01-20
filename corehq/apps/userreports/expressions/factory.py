@@ -1,12 +1,15 @@
 import functools
 import json
+import datetime
 from django.utils.translation import ugettext as _
 from jsonobject.exceptions import BadValueError
 from corehq.apps.userreports.exceptions import BadSpecError
 from corehq.apps.userreports.expressions.specs import PropertyNameGetterSpec, PropertyPathGetterSpec, \
     ConditionalExpressionSpec, ConstantGetterSpec, RootDocExpressionSpec, RelatedDocExpressionSpec, \
     IdentityExpressionSpec, IteratorExpressionSpec, SwitchExpressionSpec, ArrayIndexExpressionSpec, \
-    NestedExpressionSpec, DictExpressionSpec, NamedExpressionSpec
+    NestedExpressionSpec, DictExpressionSpec, NamedExpressionSpec, AddDaysExpressionSpec
+from dimagi.utils.parsing import json_format_datetime, json_format_date
+from dimagi.utils.web import json_handler
 
 
 def _make_filter(spec, context):
@@ -103,6 +106,15 @@ def _dict_expression(spec, context):
     return wrapped
 
 
+def _add_days_expression(spec, context):
+    wrapped = AddDaysExpressionSpec.wrap(spec)
+    wrapped.configure(
+        date_expression=ExpressionFactory.from_spec(wrapped.date_expression),
+        count_expression=ExpressionFactory.from_spec(wrapped.count_expression),
+    )
+    return wrapped
+
+
 class ExpressionFactory(object):
     spec_map = {
         'identity': _identity_expression,
@@ -118,6 +130,7 @@ class ExpressionFactory(object):
         'switch': _switch_expression,
         'nested': _nested_expression,
         'dict': _dict_expression,
+        'add_days': _add_days_expression,
     }
     # Additional items are added to the spec_map by use of the `register` method.
 
@@ -137,7 +150,7 @@ class ExpressionFactory(object):
 
     @classmethod
     def from_spec(cls, spec, context=None):
-        if _is_constant(spec):
+        if _is_literal(spec):
             return cls.from_spec(_convert_constant_to_expression_spec(spec), context)
         try:
             return cls.spec_map[spec['type']](spec, context)
@@ -148,14 +161,20 @@ class ExpressionFactory(object):
             ))
         except (TypeError, BadValueError) as e:
             raise BadSpecError(_('Problem creating getter: {}. Message is: {}').format(
-                json.dumps(spec, indent=2),
+                json.dumps(spec, indent=2, default=json_handler),
                 str(e),
             ))
 
 
-def _is_constant(value):
-    return isinstance(value, (basestring, int, bool, float))
+def _is_literal(value):
+    return not isinstance(value, dict)
 
 
 def _convert_constant_to_expression_spec(value):
+    # this is a hack to reconvert these to json-strings in case they were already
+    # converted to dates (e.g. because this was a sub-part of a filter or expression)
+    if isinstance(value, datetime.datetime):
+        value = json_format_datetime(value)
+    elif isinstance(value, datetime.date):
+        value = json_format_date(value)
     return {'type': 'constant', 'constant': value}

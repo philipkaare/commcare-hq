@@ -247,7 +247,7 @@ class SubscriptionInterface(AddItemInterface):
             DataTablesColumn("Do Not Invoice"),
             DataTablesColumn("Created By"),
             DataTablesColumn("Type"),
-            DataTablesColumn("Pro-Bono"),
+            DataTablesColumn("Discounted"),
         )
         if not self.is_rendered_as_email:
             header.add_column(DataTablesColumn("Action"))
@@ -551,7 +551,7 @@ class WireInvoiceInterface(InvoiceInterfaceBase):
                 invoice.get_domain(),
                 "YES" if new_this_month else "no",
                 contact_info.company_name,
-                contact_info.emails,
+                ', '.join(contact_info.email_list),
                 contact_info.first_name,
                 contact_info.last_name,
                 contact_info.phone_number,
@@ -735,7 +735,7 @@ class InvoiceInterface(InvoiceInterfaceBase):
                 invoice.subscription.subscriber.domain,
                 "YES" if new_this_month else "no",
                 contact_info.company_name,
-                contact_info.emails,
+                ', '.join(contact_info.email_list),
                 contact_info.first_name,
                 contact_info.last_name,
                 contact_info.phone_number,

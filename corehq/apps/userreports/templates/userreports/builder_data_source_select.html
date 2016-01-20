@@ -3,18 +3,17 @@
 {% load hq_shared_tags %}
 
 {% block js %}{{ block.super }}
-    <script src="{% new_static 'hqwebapp/js/ajax_csrf_setup.js' %}"></script>
     <script src="{% new_static 'hqwebapp/js/main.js' %}"></script>
 {% endblock %}
 
 {% block js-inline %}{{ block.super }}
     <script type="text/javascript">
         $(function () {
-            ko.applyBindings({
+            $("#report-builder-form").koApplyBindings({
                 application: ko.observable(""),
                 sourceType: ko.observable(""),
                 sourcesMap: {{ sources_map|JSON }}
-            }, $("#report-builder-form").get(0));
+            });
         });
     </script>
 {% endblock %}

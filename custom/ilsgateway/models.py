@@ -1,9 +1,12 @@
 from collections import defaultdict
 from datetime import datetime
+
+from django.core.urlresolvers import reverse
 from django.dispatch.dispatcher import receiver
 from corehq.apps.domain.signals import commcare_domain_pre_delete
 from corehq.apps.locations.signals import location_edited
-
+from corehq.apps.users.views import EditWebUserView
+from corehq.apps.users.views.mobile import EditCommCareUserView
 from dimagi.ext.couchdbkit import Document, BooleanProperty, StringProperty
 from django.db import models, connection
 
@@ -171,7 +174,7 @@ class SupplyPointStatus(models.Model):
 class DeliveryGroupReport(models.Model):
     location_id = models.CharField(max_length=100, db_index=True)
     quantity = models.IntegerField()
-    report_date = models.DateTimeField(default=datetime.utcnow())
+    report_date = models.DateTimeField(default=datetime.utcnow)
     message = models.CharField(max_length=100, db_index=True)
     delivery_group = models.CharField(max_length=1)
     external_id = models.PositiveIntegerField(null=True, db_index=True)
@@ -516,11 +519,57 @@ class ILSNotes(models.Model):
         app_label = 'ilsgateway'
 
 
+class ILSMigrationStats(models.Model):
+    products_count = models.IntegerField(default=0)
+    locations_count = models.IntegerField(default=0)
+    sms_users_count = models.IntegerField(default=0)
+    web_users_count = models.IntegerField(default=0)
+    domain = models.CharField(max_length=128, db_index=True)
+    last_modified = models.DateTimeField(auto_now=True)
+
+
+class ILSMigrationProblem(models.Model):
+    domain = models.CharField(max_length=128, db_index=True)
+    object_id = models.CharField(max_length=128, null=True)
+    object_type = models.CharField(max_length=30)
+    description = models.CharField(max_length=128)
+    external_id = models.CharField(max_length=128)
+    last_modified = models.DateTimeField(auto_now=True)
+
+    @property
+    def object_url(self):
+        from corehq.apps.locations.views import EditLocationView
+
+        if not self.object_id:
+            return
+
+        if self.object_type == 'smsuser':
+            return reverse(
+                EditCommCareUserView.urlname, kwargs={'domain': self.domain, 'couch_user_id': self.object_id}
+            )
+        elif self.object_type == 'webuser':
+            return reverse(
+                EditWebUserView.urlname, kwargs={'domain': self.domain, 'couch_user_id': self.object_id}
+            )
+        elif self.object_type == 'location':
+            return reverse(EditLocationView.urlname, kwargs={'domain': self.domain, 'loc_id': self.object_id})
+
+
+class ILSGatewayWebUser(models.Model):
+    # To remove after switchover
+    external_id = models.IntegerField(db_index=True)
+    email = models.CharField(max_length=128)
+
+
 @receiver(commcare_domain_pre_delete)
 def domain_pre_delete_receiver(domain, **kwargs):
-    domain_name = domain.name
-    locations_ids = SQLLocation.objects.filter(domain=domain_name).values_list('location_id', flat=True)
-    if locations_ids:
+    from corehq.apps.domain.deletion import ModelDeletion, CustomDeletion
+
+    def _delete_ilsgateway_data(domain_name):
+        locations_ids = SQLLocation.objects.filter(domain=domain_name).values_list('location_id', flat=True)
+        if not locations_ids:
+            return
+
         DeliveryGroupReport.objects.filter(location_id__in=locations_ids).delete()
         SupplyPointWarehouseRecord.objects.filter(supply_point__in=locations_ids).delete()
 
@@ -555,9 +604,12 @@ def domain_pre_delete_receiver(domain, **kwargs):
                 "(SELECT id FROM locations_sqllocation WHERE domain=%s)", [domain_name]
             )
 
-    ReportRun.objects.filter(domain=domain_name).delete()
-    ILSNotes.objects.filter(domain=domain_name).delete()
-    SupervisionDocument.objects.filter(domain=domain_name).delete()
+    return [
+        CustomDeletion('ilsgateway', _delete_ilsgateway_data),
+        ModelDeletion('ilsgateway', 'ReportRun', 'domain'),
+        ModelDeletion('ilsgateway', 'ILSNotes', 'domain'),
+        ModelDeletion('ilsgateway', 'SupervisionDocument', 'domain'),
+    ]
 
 
 @receiver(location_edited)

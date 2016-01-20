@@ -2,10 +2,10 @@
 # vim: ai ts=4 sts=4 et sw=4 encoding=utf-8
 from collections import defaultdict
 
-import sys
 import os
 from urllib import urlencode
 from django.contrib import messages
+import settingshelper as helper
 
 # odd celery fix
 import djcelery
@@ -33,10 +33,7 @@ BASE_DIR = os.path.dirname(__file__)
 
 # gets set to False for unit tests that run without the database
 DB_ENABLED = True
-try:
-    UNIT_TESTING = 'test' == sys.argv[1]
-except IndexError:
-    UNIT_TESTING = False
+UNIT_TESTING = helper.is_testing()
 
 ADMINS = ()
 MANAGERS = ADMINS
@@ -59,7 +56,6 @@ LANGUAGE_CODE = 'en-us'
 
 LANGUAGES = (
     ('en', 'English'),
-    ('fr', 'French'),
     ('fra', 'French'),  # we need this alias
     ('hin', 'Hindi'),
     ('sw', 'Swahili'),
@@ -111,6 +107,8 @@ del _formdesigner_path
 DJANGO_LOG_FILE = "%s/%s" % (FILEPATH, "commcarehq.django.log")
 ACCOUNTING_LOG_FILE = "%s/%s" % (FILEPATH, "commcarehq.accounting.log")
 ANALYTICS_LOG_FILE = "%s/%s" % (FILEPATH, "commcarehq.analytics.log")
+DATADOG_LOG_FILE = "%s/%s" % (FILEPATH, "commcarehq.datadog.log")
+
 
 # URL prefix for admin media -- CSS, JavaScript and images. Make sure to use a
 # trailing slash.
@@ -127,18 +125,23 @@ TEMPLATE_LOADERS = (
     'django.template.loaders.eggs.Loader',
 )
 
+# Add this to localsettings and set it to False, so that CSRF protection is enabled on localhost
+CSRF_SOFT_MODE = True
+
 MIDDLEWARE_CLASSES = [
     'django.middleware.common.CommonMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.locale.LocaleMiddleware',
+    'corehq.apps.hqwebapp.middleware.HQCsrfViewMiddleWare',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.common.BrokenLinkEmailsMiddleware',
     'django_otp.middleware.OTPMiddleware',
     'corehq.middleware.OpenRosaMiddleware',
-    'corehq.middleware.TimeoutMiddleware',
+    'corehq.middleware.NoCacheMiddleware',
     'corehq.util.global_request.middleware.GlobalRequestMiddleware',
     'corehq.apps.users.middleware.UsersMiddleware',
+    'corehq.middleware.TimeoutMiddleware',
     'corehq.apps.domain.middleware.CCHQPRBACMiddleware',
     'corehq.apps.domain.middleware.DomainHistoryMiddleware',
     'casexml.apps.phone.middleware.SyncTokenMiddleware',
@@ -149,7 +152,8 @@ MIDDLEWARE_CLASSES = [
 SESSION_ENGINE = "django.contrib.sessions.backends.cached_db"
 
 # time in minutes before forced logout due to inactivity
-INACTIVITY_TIMEOUT = 30
+INACTIVITY_TIMEOUT = 60 * 24 * 14
+SECURE_TIMEOUT = 30
 
 PASSWORD_HASHERS = (
     # this is the default list with SHA1 moved to the front
@@ -178,6 +182,7 @@ TEMPLATE_CONTEXT_PROCESSORS = [
     "corehq.util.context_processors.base_template",
     "corehq.util.context_processors.analytics_js",
     'corehq.util.context_processors.websockets_override',
+    'django.core.context_processors.i18n',
 ]
 
 location = lambda x: os.path.join(os.path.dirname(os.path.realpath(__file__)), x)
@@ -209,6 +214,7 @@ DEFAULT_APPS = (
     'django_otp.plugins.otp_totp',
     'two_factor',
     'ws4redis',
+    'statici18n',
 )
 
 CRISPY_TEMPLATE_PACK = 'bootstrap'
@@ -246,7 +252,10 @@ HQ_APPS = (
     'corehq.apps.commtrack',
     'corehq.apps.consumption',
     'corehq.apps.tzmigration',
-    'corehq.form_processor',
+    'corehq.form_processor.app_config.FormProcessorAppConfig',
+    'corehq.sql_db',
+    'corehq.sql_accessors',
+    'corehq.sql_proxy_accessors',
     'couchforms',
     'couchexport',
     'couchlog',
@@ -264,11 +273,11 @@ HQ_APPS = (
     'corehq.apps.repeaters',
     'corehq.apps.app_manager',
     'corehq.apps.es',
-    'corehq.apps.facilities',
     'corehq.apps.fixtures',
     'corehq.apps.importer',
     'corehq.apps.reminders',
     'corehq.apps.translations',
+    'corehq.apps.tour',
     'corehq.apps.users',
     'corehq.apps.settings',
     'corehq.apps.ota',
@@ -324,6 +333,7 @@ HQ_APPS = (
     'corehq.util',
     'dimagi.ext',
     'corehq.doctypemigrations',
+    'corehq.blobs',
 
     # custom reports
     'a5288',
@@ -354,7 +364,6 @@ HQ_APPS = (
 
     'custom.uth',
 
-    'custom.colalife',
     'custom.intrahealth',
     'custom.world_vision',
     'custom.up_nrhm',
@@ -366,9 +375,6 @@ HQ_APPS = (
     'custom.openclinica',
     'custom.guinea_backup',
 
-    # tests only
-    # todo: figure out how to not put these into INSTALLED_APPS, TEST_APPS doesn't seem to work
-    'testapps.test_pillowtop',
 )
 
 TEST_APPS = ()
@@ -383,8 +389,6 @@ APPS_TO_EXCLUDE_FROM_TESTS = (
     'corehq.messaging.smsbackends.http',
     'corehq.apps.ota',
     'corehq.apps.settings',
-    'corehq.messaging.smsbackends.telerivet',
-    'corehq.messaging.smsbackends.tropo',
     'corehq.messaging.smsbackends.megamobile',
     'corehq.messaging.smsbackends.yo',
     'corehq.messaging.smsbackends.smsgh',
@@ -410,11 +414,6 @@ APPS_TO_EXCLUDE_FROM_TESTS = (
     'ctable',
     'ctable_view',
     'dimagi.utils',
-    'fluff',
-    'fluff_filter',
-    'freddy',
-    'pillowtop',
-    'pillow_retry',
 )
 
 INSTALLED_APPS = DEFAULT_APPS + HQ_APPS
@@ -426,6 +425,9 @@ LOGIN_REDIRECT_URL = '/'
 
 
 REPORT_CACHE = 'default'  # or e.g. 'redis'
+
+# When set to False, HQ will not cache any reports using is_cacheable
+CACHE_REPORTS = True
 
 ####### Domain settings  #######
 
@@ -495,6 +497,7 @@ BOOKKEEPER_CONTACT_EMAILS = []
 EMAIL_SUBJECT_PREFIX = '[commcarehq] '
 
 SERVER_ENVIRONMENT = 'localdev'
+BASE_ADDRESS = 'localhost:8000'
 
 PAGINATOR_OBJECTS_PER_PAGE = 15
 PAGINATOR_MAX_PAGE_LINKS = 5
@@ -527,12 +530,10 @@ FIXTURE_GENERATORS = {
 ### Shared drive settings ###
 # Also see section after localsettings import
 SHARED_DRIVE_ROOT = None
-
-# name of the directory within SHARED_DRIVE_ROOT
+# names of directories within SHARED_DRIVE_ROOT
 RESTORE_PAYLOAD_DIR_NAME = None
-
-# name of the directory within SHARED_DRIVE_ROOT
 SHARED_TEMP_DIR_NAME = None
+SHARED_BLOB_DIR_NAME = 'blobdb'
 
 ## django-transfer settings
 # These settings must match the apache / nginx config
@@ -545,9 +546,7 @@ GET_URL_BASE = 'dimagi.utils.web.get_url_base'
 # celery
 BROKER_URL = 'django://'  # default django db based
 
-from settingshelper import celery_failure_handler
-
-CELERY_ANNOTATIONS = {'*': {'on_failure': celery_failure_handler}}
+CELERY_ANNOTATIONS = {'*': {'on_failure': helper.celery_failure_handler}}
 
 CELERY_MAIN_QUEUE = 'celery'
 
@@ -567,11 +566,10 @@ CELERY_REMINDER_CASE_UPDATE_QUEUE = CELERY_MAIN_QUEUE
 
 
 # websockets config
-from settingshelper import get_allowed_websocket_channels
 WEBSOCKET_URL = '/ws/'
 WS4REDIS_PREFIX = 'ws'
 WSGI_APPLICATION = 'ws4redis.django_runserver.application'
-WS4REDIS_ALLOWED_CHANNELS = get_allowed_websocket_channels
+WS4REDIS_ALLOWED_CHANNELS = helper.get_allowed_websocket_channels
 
 
 TEST_RUNNER = 'testrunner.TwoStageTestRunner'
@@ -587,10 +585,6 @@ COUCHLOG_BLUEPRINT_HOME = "%s%s" % (
     STATIC_URL, "hqwebapp/stylesheets/blueprint/")
 COUCHLOG_DATATABLES_LOC = "%s%s" % (
     STATIC_URL, "hqwebapp/js/lib/datatables-1.9/js/jquery.dataTables.min.js")
-
-COUCHLOG_JQMODAL_LOC = "%s%s" % (STATIC_URL, "hqwebapp/js/lib/jqModal.js")
-COUCHLOG_JQMODAL_CSS_LOC = "%s%s" % (
-    STATIC_URL, "hqwebapp/stylesheets/jqModal.css")
 
 # These allow HQ to override what shows up in couchlog (add a domain column)
 COUCHLOG_TABLE_CONFIG = {"id_column": 0,
@@ -647,7 +641,7 @@ REMINDERS_QUEUE_ENABLED = False
 
 # If a reminder still has not been processed in this number of minutes, enqueue it
 # again.
-REMINDERS_QUEUE_ENQUEUING_TIMEOUT = 60
+REMINDERS_QUEUE_ENQUEUING_TIMEOUT = 180
 
 # Number of minutes a celery task will alot for itself (via lock timeout)
 REMINDERS_QUEUE_PROCESSING_LOCK_TIMEOUT = 5
@@ -662,6 +656,12 @@ REMINDERS_QUEUE_MAX_PROCESSING_ATTEMPTS = 3
 # The number of hours to wait before counting a reminder as stale. Stale
 # reminders will not be processed.
 REMINDERS_QUEUE_STALE_REMINDER_DURATION = 7 * 24
+
+# Reminders rate limiting settings. A single project will only be allowed to
+# fire REMINDERS_RATE_LIMIT_COUNT reminders every REMINDERS_RATE_LIMIT_PERIOD
+# seconds.
+REMINDERS_RATE_LIMIT_COUNT = 30
+REMINDERS_RATE_LIMIT_PERIOD = 60
 
 
 ####### Pillow Retry Queue Settings #######
@@ -713,7 +713,6 @@ AUDIT_MODULES = [
 # Don't use google analytics unless overridden in localsettings
 ANALYTICS_IDS = {
     'GOOGLE_ANALYTICS_API_ID': '',
-    'ANALYTICS_API_ID_PUBLIC_COMMCARE': '',
     'KISSMETRICS_KEY': '',
     'HUBSPOT_API_KEY': '',
     'HUBSPOT_API_ID': '',
@@ -759,6 +758,7 @@ LOGSTASH_HOST = 'localhost'
 # on both a single instance or distributed setup this should assume localhost
 ELASTICSEARCH_HOST = 'localhost'
 ELASTICSEARCH_PORT = 9200
+ELASTICSEARCH_VERSION = 0.9
 
 ####### Couch Config #######
 # for production this ought to be set to true on your configured couch instance
@@ -812,6 +812,9 @@ LOGGING = {
         'pillowtop': {
             'format': '%(asctime)s %(levelname)s %(module)s %(message)s'
         },
+        'datadog': {
+            'format': '%(metric)s %(created)s %(value)s metric_type=%(metric_type)s %(message)s'
+        }
     },
     'filters': {
         'require_debug_false': {
@@ -846,6 +849,12 @@ LOGGING = {
             'class': 'logging.FileHandler',
             'formatter': 'simple',
             'filename': ANALYTICS_LOG_FILE
+        },
+        'datadog': {
+            'level': 'INFO',
+            'class': 'logging.FileHandler',
+            'formatter': 'datadog',
+            'filename': DATADOG_LOG_FILE
         },
         'couchlog': {
             'level': 'WARNING',
@@ -915,6 +924,11 @@ LOGGING = {
             'level': 'DEBUG',
             'propagate': True,
         },
+        'datadog-metrics': {
+            'handler': ['datadog'],
+            'level': 'INFO',
+            'propogate': False,
+        },
     }
 }
 
@@ -923,6 +937,8 @@ COMPRESS_PRECOMPILERS = (
     ('text/less', 'corehq.apps.style.precompilers.LessFilter'),
 )
 COMPRESS_ENABLED = True
+COMPRESS_JS_COMPRESSOR = 'corehq.apps.style.uglify.JsUglifySourcemapCompressor'
+# use 'compressor.js.JsCompressor' for faster local compressing (will get rid of source maps)
 
 LESS_B3_PATHS = {
     'variables': '../../../style/less/bootstrap3/includes/variables',
@@ -951,6 +967,10 @@ UCR_DATABASE_URL = None
 
 # Override this in localsettings to specify custom reporting databases
 CUSTOM_DATABASES = {}
+
+PL_PROXY_CLUSTER_NAME = 'commcarehq'
+
+USE_PARTITIONED_DATABASE = False
 
 # number of days since last access after which a saved export is considered unused
 SAVED_EXPORT_ACCESS_CUTOFF = 35
@@ -985,6 +1005,7 @@ HQ_PRIVATE_KEY = None
 
 
 KAFKA_URL = 'localhost:9092'
+
 
 try:
     # try to see if there's an environmental variable set for local_settings
@@ -1037,13 +1058,18 @@ else:
     ]
 
 ### Reporting database - use same DB as main database
+
 db_settings = DATABASES["default"].copy()
 db_settings['PORT'] = db_settings.get('PORT', '5432')
 options = db_settings.get('OPTIONS')
 db_settings['OPTIONS'] = '?{}'.format(urlencode(options)) if options else ''
-
-if UNIT_TESTING:
-    db_settings['NAME'] = 'test_{}'.format(db_settings['NAME'])
+# Use test database name, but only if running the test command.
+# Django uses different database names than the ones in DATABASES
+# when setting up for tests. However, UNIT_TESTING may be true in
+# some cases where django is not running tests (js tests on travis),
+# and therefore does not change the database name.
+db_settings['NAME'] = helper.get_db_name(db_settings['NAME'],
+                                         UNIT_TESTING and helper.is_testing())
 
 if not SQL_REPORTING_DATABASE_URL or UNIT_TESTING:
     SQL_REPORTING_DATABASE_URL = "postgresql+psycopg2://{USER}:{PASSWORD}@{HOST}:{PORT}/{NAME}{OPTIONS}".format(
@@ -1054,6 +1080,11 @@ if not UCR_DATABASE_URL or UNIT_TESTING:
     # by default just use the reporting DB for UCRs
     UCR_DATABASE_URL = SQL_REPORTING_DATABASE_URL
 
+if USE_PARTITIONED_DATABASE:
+    DATABASE_ROUTERS = ['corehq.sql_db.routers.PartitionRouter']
+else:
+    DATABASE_ROUTERS = ['corehq.sql_db.routers.MonolithRouter']
+
 MVP_INDICATOR_DB = 'mvp-indicators'
 
 INDICATOR_CONFIG = {
@@ -1062,13 +1093,8 @@ INDICATOR_CONFIG = {
 }
 
 ####### Couch Forms & Couch DB Kit Settings #######
-from settingshelper import (
-    get_dynamic_db_settings,
-    CouchSettingsHelper,
-    SharedDriveConfiguration
-)
-
-_dynamic_db_settings = get_dynamic_db_settings(
+COUCH_DATABASE_NAME = helper.get_db_name(COUCH_DATABASE_NAME, UNIT_TESTING)
+_dynamic_db_settings = helper.get_dynamic_db_settings(
     COUCH_SERVER_ROOT,
     COUCH_USERNAME,
     COUCH_PASSWORD,
@@ -1086,7 +1112,10 @@ NEW_FIXTURES_DB = 'fixtures'
 FIXTURES_DB = NEW_FIXTURES_DB
 
 NEW_DOMAINS_DB = 'domains'
-DOMAINS_DB = None
+DOMAINS_DB = NEW_DOMAINS_DB
+
+SYNCLOGS_DB = 'synclogs'
+
 
 COUCHDB_APPS = [
     'api',
@@ -1118,7 +1147,6 @@ COUCHDB_APPS = [
     'indicators',
     'locations',
     'mobile_auth',
-    'phone',
     'pillowtop',
     'pillow_retry',
     'products',
@@ -1181,13 +1209,18 @@ COUCHDB_APPS = [
 
     # domains
     ('domain', DOMAINS_DB),
+
+    # sync logs
+    ('phone', SYNCLOGS_DB),
 ]
 
 COUCHDB_APPS += LOCAL_COUCHDB_APPS
 
-COUCH_SETTINGS_HELPER = CouchSettingsHelper(COUCH_DATABASE, COUCHDB_APPS, [
-    NEW_USERS_GROUPS_DB, NEW_FIXTURES_DB, NEW_DOMAINS_DB,
-])
+COUCH_SETTINGS_HELPER = helper.CouchSettingsHelper(
+    COUCH_DATABASE,
+    COUCHDB_APPS,
+    [NEW_USERS_GROUPS_DB, NEW_FIXTURES_DB, NEW_DOMAINS_DB],
+)
 COUCHDB_DATABASES = COUCH_SETTINGS_HELPER.make_couchdb_tuples()
 EXTRA_COUCHDB_DATABASES = COUCH_SETTINGS_HELPER.get_extra_couchdbs()
 
@@ -1202,11 +1235,12 @@ INSTALLED_APPS = [x for x in INSTALLED_APPS if x not in seen and not seen.add(x)
 MIDDLEWARE_CLASSES += LOCAL_MIDDLEWARE_CLASSES
 
 ### Shared drive settings ###
-SHARED_DRIVE_CONF = SharedDriveConfiguration(
+SHARED_DRIVE_CONF = helper.SharedDriveConfiguration(
     SHARED_DRIVE_ROOT,
     RESTORE_PAYLOAD_DIR_NAME,
     TRANSFER_FILE_DIR_NAME,
-    SHARED_TEMP_DIR_NAME
+    SHARED_TEMP_DIR_NAME,
+    SHARED_BLOB_DIR_NAME
 )
 TRANSFER_MAPPINGS = {
     SHARED_DRIVE_CONF.transfer_dir: '/{}'.format(TRANSFER_FILE_DIR_NAME),  # e.g. '/mnt/shared/downloads': '/downloads',
@@ -1267,6 +1301,10 @@ SMS_LOADED_BACKENDS = [
     'corehq.messaging.smsbackends.megamobile.models.MegamobileBackend',
     'corehq.messaging.smsbackends.smsgh.models.SMSGHBackend',
     'corehq.messaging.smsbackends.apposit.models.AppositBackend',
+]
+
+IVR_LOADED_BACKENDS = [
+    'corehq.messaging.ivrbackends.kookoo.models.KooKooBackend',
 ]
 
 IVR_BACKEND_MAP = {
@@ -1332,8 +1370,6 @@ PILLOWTOPS = {
     'fluff': [
         'custom.bihar.models.CareBiharFluffPillow',
         'custom.opm.models.OpmUserFluffPillow',
-        'custom.apps.cvsu.models.UnicefMalawiFluffPillow',
-        'custom.reports.mc.models.MalariaConsortiumFluffPillow',
         'custom.m4change.models.AncHmisCaseFluffPillow',
         'custom.m4change.models.LdHmisCaseFluffPillow',
         'custom.m4change.models.ImmunizationHmisCaseFluffPillow',
@@ -1353,6 +1389,7 @@ PILLOWTOPS = {
         'custom.world_vision.models.WorldVisionChildFluffPillow',
         'custom.world_vision.models.WorldVisionHierarchyFluffPillow',
         'custom.succeed.models.UCLAPatientFluffPillow',
+        'custom.reports.mc.models.MalariaConsortiumFluffPillow',
     ],
     'mvp_indicators': [
         'mvp_docs.pillows.MVPFormIndicatorPillow',
@@ -1365,6 +1402,11 @@ PILLOWTOPS = {
             'instance': 'corehq.apps.change_feed.pillow.get_default_couch_db_change_feed_pillow',
         },
         {
+            'name': 'UserGroupsDbKafkaPillow',
+            'class': 'pillowtop.pillow.interface.ConstructedPillow',
+            'instance': 'corehq.apps.change_feed.pillow.get_user_groups_db_kafka_pillow',
+        },
+        {
             'name': 'KafkaCaseConsumerPillow',
             'class': 'pillowtop.pillow.interface.ConstructedPillow',
             'instance': 'corehq.apps.change_feed.consumer.pillow.get_demo_case_consumer_pillow',
@@ -1374,7 +1416,11 @@ PILLOWTOPS = {
             'class': 'corehq.apps.change_feed.consumer.pillow.LoggingPythonPillow',
             'instance': 'corehq.apps.change_feed.consumer.pillow.get_demo_python_pillow_consumer',
         },
-
+        {
+            'name': 'BlobDeletionPillow',
+            'class': 'pillowtop.pillow.interface.ConstructedPillow',
+            'instance': 'corehq.blobs.pillow.get_blob_deletion_pillow',
+        },
     ]
 }
 
@@ -1419,7 +1465,6 @@ COUCH_CACHE_BACKENDS = [
     'corehq.apps.cachehq.cachemodels.UserRoleGenerationCache',
     'corehq.apps.cachehq.cachemodels.ReportGenerationCache',
     'corehq.apps.cachehq.cachemodels.DefaultConsumptionGenerationCache',
-    'corehq.apps.cachehq.cachemodels.LocationGenerationCache',
     'corehq.apps.cachehq.cachemodels.InvitationGenerationCache',
     'corehq.apps.cachehq.cachemodels.UserReportsDataSourceCache',
     'dimagi.utils.couch.cache.cache_core.gen.GlobalCache',
@@ -1542,7 +1587,7 @@ TRAVIS_TEST_GROUPS = (
         'facilities', 'fixtures', 'fluff_filter', 'formplayer',
         'formtranslate', 'fri', 'grapevine', 'groups', 'gsid', 'hope',
         'hqadmin', 'hqcase', 'hqcouchlog', 'hqmedia',
-        'care_pathways', 'colalife', 'common', 'compressor', 'smsbillables',
+        'care_pathways', 'common', 'compressor', 'smsbillables',
     ),
 )
 
@@ -1563,6 +1608,7 @@ COMPRESS_OFFLINE_CONTEXT = {
 }
 
 COMPRESS_CSS_HASHING_METHOD = 'content'
+
 
 
 if 'locmem' not in CACHES:

@@ -193,8 +193,14 @@ cloudCare.SessionView = Selectable.extend({
             e.stopPropagation();
             var dialog = confirm(translatedStrings.deleteSaved);
             if (dialog == true) {
-                self.model.destroy();
-                showSuccess(translatedStrings.deleteSuccess, $("#cloudcare-notifications"), 10000);
+                self.model.destroy({
+                    success: function(model, response) {
+                        showSuccess(translatedStrings.deleteSuccess, $("#cloudcare-notifications"), 10000);
+                    },
+                    error: function(model, response) {
+                        showError(translatedStrings.deleteError, $("#cloudcare-notifications"), 10000);
+                    }
+                });
             }
         });
         $("<a />").text(this.model.get('display')).appendTo($(this.el));
@@ -328,6 +334,17 @@ cloudCare.Module = LocalizableModel.extend({
         };
         throw exc;
     }
+});
+
+cloudCare.SyncView = Backbone.View.extend({
+    el: $('#sync-container'),
+    events: {
+        "click #sync-button" : "sync"
+    },
+    sync: function (e) {
+        cloudCare.dispatch.trigger("sync-db");
+    }
+
 });
 
 cloudCare.ModuleView = Selectable.extend({
@@ -482,6 +499,14 @@ cloudCare.AppView = Backbone.View.extend({
             language: self.options.language
         });
 
+        self.syncButtonView = new cloudCare.SyncView({
+            username: self.options.username
+        });
+
+        cloudCare.dispatch.on("sync-db", function () {
+            self.syncDb(self.options.username);
+        });
+
         cloudCare.dispatch.on("form:selected", function (form) {
             if (self.selectedForm !== form){
                 self.selectParent(null);
@@ -602,6 +627,9 @@ cloudCare.AppView = Backbone.View.extend({
 
         return url;
     },
+    getSyncUrl: function () {
+        return "/webforms/player_proxy";
+    },
     playSession: function (session) {
         var self = this;
         var session_id = session.get('id');
@@ -695,7 +723,10 @@ cloudCare.AppView = Backbone.View.extend({
                     url: self.options.renderFormRoot,
                     data: {'session_id': sessionId},
                     success: function (data) {
-                        var codeMirror = CodeMirror(function(el) {
+                        var $instanceTab = $('#debugger-xml-instance-tab'),
+                            codeMirror;
+
+                        codeMirror = CodeMirror(function(el) {
                             $('#xml-viewer-pretty').html(el);
                         }, {
                             value: data.instance_xml,
@@ -703,6 +734,11 @@ cloudCare.AppView = Backbone.View.extend({
                             viewportMargin: Infinity,
                             readOnly: true,
                             lineNumbers: true,
+                        });
+
+                        $instanceTab.off();
+                        $instanceTab.on('shown.bs.tab', function() {
+                            codeMirror.refresh();
                         });
 
                         $("#question-viewer-pretty").html(data.form_data || 'Could not render form');
@@ -722,18 +758,14 @@ cloudCare.AppView = Backbone.View.extend({
                 return '/hq/multimedia/file/' + media_type + '/' + id + '/' + name;
             }
         };
+        data.onLoading = tfLoading;
+        data.onLoadingComplete = tfLoadingComplete;
         var loadSession = function() {
             var sess = new WebFormSession(data);
             // TODO: probably shouldn't hard code these divs
-            sess.load($('#webforms'), self.options.language, {
-                onLoading: tfLoading,
-                onLoadingComplete: tfLoadingComplete
-            });
+            sess.load($('#webforms'), self.options.language);
         };
-        var promptForOffline = function(show) {
-            $('#offline-prompt')[show ? 'show' : 'hide']();
-        };
-        touchformsInit(data.xform_url, loadSession, promptForOffline);
+        loadSession();
     },
     selectForm: function (form) {
         var self = this;
@@ -842,7 +874,22 @@ cloudCare.AppView = Backbone.View.extend({
         $('#webforms').html("");
         this.caseSelectionView.model.set("parentCase", null);
         this.caseSelectionView.model.set("childCase", null);
-    }
+    },
+    syncDb: function (username) {
+        var self = this;
+        var resp = $.ajax({
+            url: self.options.syncDbUrl,
+            dataType: "json",
+            data: {"username": username},
+        });
+        $('#sync-button').disableButton();
+        showLoading();
+        resp.done(function (data) {
+            tfSyncComplete(data.status === "error");
+            $('#sync-button').enableButton();
+        });
+
+    },
 });
 
 cloudCare.AppMainView = Backbone.View.extend({
@@ -906,7 +953,9 @@ cloudCare.AppMainView = Backbone.View.extend({
             sessionUrlRoot: self.options.sessionUrlRoot,
             submitUrlRoot: self.options.submitUrlRoot,
             renderFormRoot: self.options.renderFormRoot,
-            instanceViewerEnabled: self.options.instanceViewerEnabled
+            instanceViewerEnabled: self.options.instanceViewerEnabled,
+            username: self.options.username,
+            syncDbUrl: self.options.syncDbUrl,
         });
 
         // fetch session list here
