@@ -1239,7 +1239,7 @@ def set_websocket_supervisorconf():
 @task
 def set_supervisor_config():
     setup_release()
-    # _set_supervisor_config()
+    _set_supervisor_config()
     _execute_with_timing(update_current)
 
 def _set_supervisor_config():
